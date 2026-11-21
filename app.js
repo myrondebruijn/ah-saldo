@@ -658,8 +658,6 @@ async function editPurchase(purchase) {
   $('storeList').innerHTML = shops().map((shop) => `<option value="${esc(shop)}">`).join('');
   // a new purchase starts with the shop of the last one that was paid without cards
   field.store.value = purchase ? purchase.store : state.purchases.findLast((each) => !each.cards)?.store ?? '';
-  field.store.autofocus = !field.store.value; // start typing where something is still missing
-  field.total.autofocus = Boolean(field.store.value);
   const before = isoDate(new Date(purchase?.at ?? Date.now()));
   field.total.value = purchase ? euroInput(purchase.total) : '';
   field.date.value = before;
