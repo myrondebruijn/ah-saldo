@@ -4,6 +4,7 @@ body {
   --bg: #f2f2f7; --cell: #fff; --label: #000; --label2: #6c6c70; --line: #c6c6c8; --fill: #ececf1;
   --tint: #0071e3; --tint-deep: #0058cc; --link: #0066cc; --red: #d70015;
   --soon-bg: #ffefcf; --soon: #8a5200; --late-bg: #fde7e5; --late: #b3261e;
+  --quiet: #8e8e93; --meter-track: #d9eafb; --track: #e3e3e8; --thumb: #fff;
   --pass-shadow: 0 .375rem 1rem rgb(0 88 204 / .28);
   color-scheme: light;
 }
@@ -12,6 +13,7 @@ body {
     --bg: #000; --cell: #1c1c1e; --label: #fff; --label2: #9a9aa0; --line: #38383a; --fill: #2c2c2e;
     --link: #409cff; --red: #ff6961;
     --soon-bg: #3b2a08; --soon: #ffcf85; --late-bg: #3d1614; --late: #ffa198;
+    --meter-track: #172b41; --track: #1c1c1e; --thumb: #48484a;
     --pass-shadow: none; /* a blue shadow on black reads as a glow */
     color-scheme: dark;
   }
@@ -63,7 +65,7 @@ body:has(#dock:not([hidden])) main { padding-bottom: calc(7.5rem + env(safe-area
 .footnote, .section, .group-note, .when { font-size: .8125rem; line-height: 1.35; color: var(--label2); }
 .section { margin: 1.75rem 1rem .5rem; font-weight: 400; text-transform: uppercase; }
 .group-note { margin: .5rem 1rem 0; }
-.total { margin: .125rem 0; font-size: 2.875rem; line-height: 1.1; font-weight: 700; letter-spacing: -.02em; }
+.total { margin: .125rem 0; font-size: 2.875rem; line-height: 1.1; font-weight: 700; letter-spacing: -.02em; font-variant-numeric: normal; }
 
 /* ---------- bars ---------- */
 .large-title { display: flex; align-items: center; justify-content: space-between; padding: 1.75rem .25rem .375rem; }
@@ -77,7 +79,7 @@ body:has(#dock:not([hidden])) main { padding-bottom: calc(7.5rem + env(safe-area
   top: 0;
   z-index: 1;
   display: grid;
-  grid-template-columns: 1fr auto 1fr;
+  grid-template-columns: 1fr minmax(0, auto) 1fr;
   align-items: center;
   min-height: 2.75rem;
   margin: calc(-.5rem - env(safe-area-inset-top)) -1rem .75rem;
@@ -87,7 +89,7 @@ body:has(#dock:not([hidden])) main { padding-bottom: calc(7.5rem + env(safe-area
   -webkit-backdrop-filter: saturate(180%) blur(20px);
   backdrop-filter: saturate(180%) blur(20px);
 }
-.navbar h1 { font-size: 1.0625rem; font-weight: 600; white-space: nowrap; }
+.navbar h1 { overflow: hidden; font-size: 1.0625rem; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 21.5rem) { .navbar h1 span { display: none; } } /* the smallest phones: digits only */
 .navbar > :last-child { justify-self: end; padding: 0 .375rem; }
 .back { display: inline-flex; align-items: center; justify-self: start; min-height: 2.75rem; padding-right: .5rem; color: var(--link); }
@@ -149,8 +151,32 @@ body:has(#dock:not([hidden])) main { padding-bottom: calc(7.5rem + env(safe-area
 .saldo { display: flex; flex-wrap: wrap; align-items: baseline; gap: .25rem .75rem; margin: 1.25rem .25rem 0; }
 .saldo .total { margin: 0; font-size: 2.125rem; }
 
+/* ---------- statistics ---------- */
+.segments { display: flex; gap: 2px; padding: 2px; border-radius: 99px; background: var(--track); }
+.segments button { flex: 1; min-height: 2.25rem; border-radius: 99px; font-size: .8125rem; font-weight: 600; text-align: center; }
+.segments [aria-pressed="true"] { background: var(--thumb); box-shadow: 0 1px 3px rgb(0 0 0 / .12); }
+.stepper { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+.stepper h2 { font-size: 1.0625rem; font-weight: 600; text-align: center; }
+.stepper small { display: block; color: var(--label2); font-size: .8125rem; font-weight: 400; }
+.stepper button { display: grid; place-items: center; width: 2.75rem; height: 2.75rem; margin: -.5rem; color: var(--link); }
+.stepper button:disabled { color: var(--label2); opacity: .4; cursor: default; }
+.period .total { margin-top: .5rem; text-align: center; }
+/* spending per period: the chosen period in blue, the others grey; a hairline is the baseline */
+.columns { position: relative; display: flex; margin-top: 1rem; }
+.columns::before { content: ""; position: absolute; top: 5.75rem; right: 0; left: 0; height: 1px; background: var(--line); }
+.columns li { flex: 1; }
+.column { display: grid; justify-items: center; gap: .375rem; width: 100%; padding-bottom: .125rem; color: var(--label2); font-size: .8125rem; text-align: center; }
+.column svg { width: 1.5rem; height: 5.75rem; fill: var(--quiet); }
+.column[aria-pressed="true"] { color: var(--label); font-weight: 600; }
+.column[aria-pressed="true"] svg { fill: var(--tint); }
+/* a share of the period: the bar sits under the name and its amount */
+.meter-row { display: grid; grid-template-columns: 1fr auto; gap: .375rem .75rem; }
+.meter-row small { display: inline; }
+.meter { grid-column: 1 / -1; width: 100%; height: .5rem; fill: var(--tint); }
+.meter .track { fill: var(--meter-track); }
+
 /* ---------- buttons and dock ---------- */
-.button { flex: 1; display: grid; place-items: center; min-height: 3.125rem; padding: 0 1rem; border-radius: .875rem; background: var(--fill); font-weight: 600; text-align: center; }
+.button { flex: 1 1 auto; display: flex; align-items: center; justify-content: center; gap: .375rem; min-height: 3.125rem; padding: 0 1rem; border-radius: .875rem; background: var(--fill); font-weight: 600; white-space: nowrap; }
 .button.primary { background: var(--tint); color: #fff; }
 #dock {
   position: fixed;
@@ -215,6 +241,21 @@ input::-webkit-date-and-time-value { text-align: left; }
 .action-sheet .row { justify-content: center; min-height: 3.5rem; }
 .action-sheet form > .row { border-radius: .875rem; background: var(--cell); color: var(--link); font-weight: 600; }
 
+/* who a purchase was for: a list to pick from, and amounts once Verdelen is on */
+.choice input[type="radio"] { position: absolute; width: 1px; min-height: 0; height: 1px; opacity: 0; }
+.choice .icon { color: var(--link); visibility: hidden; }
+.choice input:checked ~ .icon { visibility: visible; }
+.choice:has(input[type="radio"]:focus-visible) { box-shadow: inset 0 0 0 2px var(--tint); }
+.part { display: none; flex: none; width: 5.5rem; text-align: right; }
+#whoHint { display: none; }
+#whoDialog:has([name="split"]:checked) :is(.part, #whoHint) { display: block; }
+.choice input[type="radio"]:checked ~ .part { visibility: hidden; } /* the chosen name gets the rest, so it needs no amount */
+.switch { position: relative; flex: none; width: 3.1875rem; min-height: 0; height: 1.9375rem; border-radius: 99px; background: var(--track); cursor: pointer; transition: background .2s; }
+.switch::before { content: ""; position: absolute; top: 2px; left: 2px; width: 1.6875rem; height: 1.6875rem; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / .3); transition: transform .2s; }
+.switch:checked { background: var(--tint); }
+.switch:checked::before { transform: translateX(1.25rem); }
+.switch:focus-visible { outline: 3px solid var(--link); outline-offset: 2px; }
+
 #toast {
   position: fixed;
   left: 50%;
@@ -243,12 +284,12 @@ input::-webkit-date-and-time-value { text-align: left; }
 .steps b { flex: none; display: grid; place-items: center; width: 1.75rem; height: 1.75rem; border-radius: 50%; background: var(--tint); color: #fff; font-size: .8125rem; font-weight: 600; }
 
 /* ---------- pressed and hover states ---------- */
-.pass, .button, .round, .text-button, .back, .row-icon { transition: opacity .12s; }
-.pass:active, .button:active, .round:active, .text-button:active, .back:active, .row-icon:active { opacity: .6; }
+.pass, .button, .round, .text-button, .back, .row-icon, .column, .stepper button, .segments button { transition: opacity .12s; }
+:is(.pass, .button, .round, .text-button, .back, .row-icon, .column, .stepper button, .segments button):active { opacity: .6; }
 a.row:active, button.row:active { background: var(--fill); }
 @media (hover: hover) {
   a.row:hover, button.row:hover { background: var(--fill); }
-  .pass:hover, .button:hover, .round:hover { opacity: .88; }
+  .pass:hover, .button:hover, .round:hover, .column:hover { opacity: .88; }
 }
 
 /* ---------- motion: iPhone push between screens, sheets rising ---------- */

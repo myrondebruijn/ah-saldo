@@ -41,14 +41,70 @@ export const sortCards = (cards) => [...cards].sort((a, b) =>
 
 // What one payment took from each card, given the balances (in cents) of the cards used, in the order the till got them.
 // The till empties every card before it asks for the next, so only the last one can have money left.
-// `total` is the amount due when the cards covered all of it; null means a rest was paid another way, so all are empty.
-// Returns the cents taken per card, or 'low' / 'high' when that total cannot be right for these cards.
+// `total` is the whole amount due; whatever the cards could not cover was paid another way (pin).
+// Returns the cents taken per card, or 'low' when the earlier cards alone would have covered that total.
 export function settle(balances, total) {
-  if (total === null) return balances;
   const earlier = balances.slice(0, -1).reduce((sum, cents) => sum + cents, 0);
-  if (total <= earlier) return 'low'; // the last card would not have been needed
-  if (total > earlier + balances.at(-1)) return 'high'; // the cards could not have covered it
-  return [...balances.slice(0, -1), total - earlier];
+  if (total <= earlier) return 'low'; // also refuses a total of zero
+  return balances.length ? [...balances.slice(0, -1), Math.min(balances.at(-1), total - earlier)] : [];
+}
+
+// Who a purchase of `total` cents was for: `parts` are [name, cents] pairs for the others, and `main` gets what is left.
+// Returns [{ who, cents }] adding up to the total, largest first, or 'over' when the parts exceed it.
+export function shareOut(total, main, parts) {
+  const cents = new Map([[main, 0]]);
+  for (const [who, amount] of parts) cents.set(who, (cents.get(who) ?? 0) + amount);
+  const rest = total - parts.reduce((sum, [, amount]) => sum + amount, 0);
+  if (rest < 0) return 'over';
+  cents.set(main, cents.get(main) + rest);
+  return [...cents].filter(([, amount]) => amount > 0).map(([who, amount]) => ({ who, cents: amount }))
+    .sort((p, q) => q.cents - p.cents);
+}
+
+// ---------- periods and statistics ----------
+
+// First day (local midnight) of the week (Monday), month or year that `date` falls in.
+export function periodStart(unit, date) {
+  const start = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  if (unit === 'week') start.setDate(start.getDate() - (start.getDay() + 6) % 7);
+  if (unit === 'month') start.setDate(1);
+  if (unit === 'year') start.setMonth(0, 1);
+  return start;
+}
+
+// The start of the period `by` periods after (or, negative, before) the one starting at `start`.
+export function shiftPeriod(unit, start, by) {
+  const shifted = new Date(start);
+  if (unit === 'week') shifted.setDate(shifted.getDate() + 7 * by);
+  if (unit === 'month') shifted.setMonth(shifted.getMonth() + by);
+  if (unit === 'year') shifted.setFullYear(shifted.getFullYear() + by);
+  return shifted;
+}
+
+// ISO week number: weeks start on Monday and week 1 holds the year's first Thursday
+export function isoWeek(date) {
+  const day = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  day.setUTCDate(day.getUTCDate() + 4 - (day.getUTCDay() || 7)); // the Thursday of this week
+  return Math.ceil(((day - Date.UTC(day.getUTCFullYear(), 0, 1)) / DAY + 1) / 7);
+}
+
+// The purchases dated from `start` up to (not including) `end`, newest first, with their totals:
+// overall, the part paid with gift cards, and [name, cents] lists per person and per shop, largest first.
+export function summarize(purchases, start, end) {
+  const inside = purchases.filter((purchase) => new Date(purchase.at) >= start && new Date(purchase.at) < end)
+    .sort((p, q) => q.at.localeCompare(p.at));
+  const tally = (pairs) => {
+    const sums = new Map();
+    for (const [key, cents] of pairs) sums.set(key, (sums.get(key) ?? 0) + cents);
+    return [...sums].sort((p, q) => q[1] - p[1]);
+  };
+  return {
+    purchases: inside,
+    total: inside.reduce((sum, purchase) => sum + purchase.total, 0),
+    cards: inside.reduce((sum, purchase) => sum + purchase.cards, 0),
+    byWho: tally(inside.flatMap((purchase) => purchase.shares.map((share) => [share.who, share.cents]))),
+    byStore: tally(inside.map((purchase) => [purchase.store, purchase.total])),
+  };
 }
 
 // Code 128: the widths of the three bars and three spaces of each symbol value 0-105, then the stop symbol (106)
@@ -80,8 +136,17 @@ export function code128(digits) {
 export const needsInstall = (userAgent, standalone) => /iPhone|iPad|iPod/.test(userAgent) && !standalone;
 
 const isId = (id) => typeof id === 'string' && /^[\w-]{1,64}$/.test(id);
-const isEntry = (entry) => isId(entry?.id) && typeof entry.at === 'string' && !Number.isNaN(Date.parse(entry.at))
-  && KINDS.includes(entry.kind) && Number.isInteger(entry.delta);
+const isTime = (text) => typeof text === 'string' && !Number.isNaN(Date.parse(text));
+const isEntry = (entry) => isId(entry?.id) && isTime(entry.at) && KINDS.includes(entry.kind) && Number.isInteger(entry.delta)
+  && (entry.purchase === undefined || isId(entry.purchase));
+// a shop or person name: free text, so it is escaped wherever it is shown
+export const isName = (text) => typeof text === 'string' && /^[^\u0000-\u001f]{1,30}$/.test(text) && text === text.trim();
+const isPurchase = (purchase) => isId(purchase?.id) && isTime(purchase.at) && isName(purchase.store)
+  && Number.isInteger(purchase.total) && purchase.total > 0
+  && Number.isInteger(purchase.cards) && purchase.cards >= 0 && purchase.cards <= purchase.total
+  && Array.isArray(purchase.shares) && purchase.shares.length > 0
+  && purchase.shares.every((share) => isName(share?.who) && Number.isInteger(share.cents) && share.cents > 0)
+  && purchase.shares.reduce((sum, share) => sum + share.cents, 0) === purchase.total;
 
 // Reads saved data or a backup file. Throws on anything that is not exactly our shape,
 // because the result is rendered as HTML and holds the card codes.
@@ -95,8 +160,13 @@ export function parseState(json) {
     if (!ok) throw new Error('invalid card');
     return {
       id: card.id, number: card.number, code: card.code, expiry: card.expiry,
-      entries: card.entries.map(({ id, at, kind, delta }) => ({ id, at, kind, delta })),
+      entries: card.entries.map(({ id, at, kind, delta, purchase }) => ({ id, at, kind, delta, ...(purchase && { purchase }) })),
     };
   });
-  return { cards, needsBackup: data.needsBackup === true };
+  const listed = data.purchases ?? []; // data from before purchases existed has none
+  if (!Array.isArray(listed) || !listed.every(isPurchase)) throw new Error('invalid purchase');
+  const purchases = listed.map(({ id, at, store, total, cards: fromCards, shares }) => ({
+    id, at, store, total, cards: fromCards, shares: shares.map(({ who, cents }) => ({ who, cents })),
+  }));
+  return { cards, purchases, needsBackup: data.needsBackup === true };
 }

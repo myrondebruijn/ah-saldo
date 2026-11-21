@@ -1,7 +1,7 @@
 // Offline support: answer from the saved copy at once (the shop may have no signal)
 // and refresh that copy in the background.
 // Change the version on every release: a new version then installs as one complete set of files.
-const CACHE = 'ah-saldo-v2';
+const CACHE = 'ah-saldo-v3';
 const FILES = ['./', 'style.css', 'app.js', 'logic.js', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', (event) => {

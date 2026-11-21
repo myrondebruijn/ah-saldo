@@ -58,10 +58,55 @@ test('settle works out what a payment took from each card', () => {
   assert.deepEqual(logic.settle([1270], 500), [500]); // one card, part used
   assert.deepEqual(logic.settle([1270], 1270), [1270]); // one card, exactly emptied
   assert.deepEqual(logic.settle([1270, 5000], 3000), [1270, 1730]); // first emptied, second pays the rest
-  assert.deepEqual(logic.settle([1270, 5000], null), [1270, 5000]); // a rest went by pin: all empty
+  assert.deepEqual(logic.settle([1270, 5000], 9000), [1270, 5000]); // more than the cards held: the rest went by pin
+  assert.deepEqual(logic.settle([], 2500), []); // no card used at all
   assert.equal(logic.settle([1270, 5000], 1270), 'low'); // the first card alone covered it
   assert.equal(logic.settle([1270], 0), 'low');
-  assert.equal(logic.settle([1270, 5000], 6271), 'high'); // more than the cards held
+  assert.equal(logic.settle([], 0), 'low');
+});
+
+test('shareOut gives the main person what the others leave', () => {
+  assert.deepEqual(logic.shareOut(4200, 'Wij', []), [{ who: 'Wij', cents: 4200 }]);
+  assert.deepEqual(logic.shareOut(4200, 'Wij', [['Oma', 1200]]), [{ who: 'Wij', cents: 3000 }, { who: 'Oma', cents: 1200 }]);
+  assert.deepEqual(logic.shareOut(4200, 'Wij', [['Oma', 3000], ['Jan', 1200]]), [{ who: 'Oma', cents: 3000 }, { who: 'Jan', cents: 1200 }]);
+  assert.deepEqual(logic.shareOut(4200, 'Oma', [['Oma', 1000]]), [{ who: 'Oma', cents: 4200 }]); // a part for the main person merges
+  assert.equal(logic.shareOut(4200, 'Wij', [['Oma', 4201]]), 'over');
+});
+
+test('periods start on Monday, the 1st and 1 January, and shift by whole periods', () => {
+  const day = new Date(2026, 10, 21, 15, 30); // Saturday 21 November 2026
+  const ymd = (date) => logic.isoDate(date);
+  assert.equal(ymd(logic.periodStart('week', day)), '2026-11-16');
+  assert.equal(ymd(logic.periodStart('month', day)), '2026-11-01');
+  assert.equal(ymd(logic.periodStart('year', day)), '2026-01-01');
+  assert.equal(ymd(logic.periodStart('week', new Date(2026, 10, 22))), '2026-11-16'); // Sunday still belongs to that week
+  assert.equal(ymd(logic.shiftPeriod('week', new Date(2026, 10, 16), -1)), '2026-11-09');
+  assert.equal(ymd(logic.shiftPeriod('month', new Date(2026, 0, 1), -1)), '2025-12-01');
+  assert.equal(ymd(logic.shiftPeriod('year', new Date(2026, 0, 1), 1)), '2027-01-01');
+});
+
+test('isoWeek numbers weeks the Dutch way', () => {
+  assert.equal(logic.isoWeek(new Date(2026, 10, 21)), 47);
+  assert.equal(logic.isoWeek(new Date(2026, 0, 1)), 1); // a Thursday
+  assert.equal(logic.isoWeek(new Date(2027, 0, 1)), 53); // a Friday: still week 53 of 2026
+  assert.equal(logic.isoWeek(new Date(2024, 11, 30)), 1); // a Monday that already belongs to 2025
+});
+
+test('summarize totals a period per person and per shop', () => {
+  const purchase = (id, day, store, total, cards, shares) => ({ id, at: new Date(2026, 10, day, 12).toISOString(), store, total, cards, shares });
+  const purchases = [
+    purchase('a', 2, 'AH', 3000, 3000, [{ who: 'Wij', cents: 3000 }]),
+    purchase('b', 10, 'Jumbo', 4200, 0, [{ who: 'Wij', cents: 3000 }, { who: 'Oma', cents: 1200 }]),
+    purchase('c', 20, 'AH', 1000, 400, [{ who: 'Oma', cents: 1000 }]),
+    purchase('d', 30, 'Plus', 9900, 0, [{ who: 'Wij', cents: 9900 }]),
+  ];
+  const first = logic.summarize(purchases, new Date(2026, 10, 1), new Date(2026, 10, 30)); // the 30th itself is outside
+  assert.deepEqual(first.purchases.map((each) => each.id), ['c', 'b', 'a']);
+  assert.equal(first.total, 8200);
+  assert.equal(first.cards, 3400);
+  assert.deepEqual(first.byWho, [['Wij', 6000], ['Oma', 2200]]);
+  assert.deepEqual(first.byStore, [['Jumbo', 4200], ['AH', 4000]]);
+  assert.equal(logic.summarize(purchases, new Date(2025, 0, 1), new Date(2025, 11, 31)).total, 0);
 });
 
 test('CODE128 table is well formed', () => {
@@ -90,7 +135,24 @@ test('needsInstall only insists on an iPhone outside the Home Screen', () => {
 
 test('parseState round-trips good data and drops unknown fields', () => {
   const parsed = logic.parseState(JSON.stringify({ app: 'ah-saldo', cards: [{ ...card(), extra: '<b>' }] }));
-  assert.deepEqual(parsed, { cards: [card()], needsBackup: false });
+  assert.deepEqual(parsed, { cards: [card()], purchases: [], needsBackup: false });
+});
+
+test('parseState keeps purchases and the card entries that belong to them', () => {
+  const bought = { id: 'p1', at: '2026-11-21T10:00:00.000Z', store: "Jumbo & 't Hoekje", total: 4200, cards: 1200, shares: [{ who: 'Wij', cents: 3000 }, { who: 'Oma', cents: 1200 }] };
+  const linked = card({ entries: [entry('start', 2500), { ...entry('pay', -1200), purchase: 'p1' }] });
+  const parsed = logic.parseState(JSON.stringify({ cards: [linked], purchases: [{ ...bought, extra: 1 }] }));
+  assert.deepEqual(parsed, { cards: [linked], purchases: [bought], needsBackup: false });
+  const bad = [
+    { ...bought, total: 4100 }, // shares no longer add up
+    { ...bought, cards: 5000 }, // more from cards than the total
+    { ...bought, store: '' },
+    { ...bought, store: 'x'.repeat(31) },
+    { ...bought, shares: [{ who: ' Wij', cents: 4200 }] }, // untrimmed name
+    { ...bought, shares: [] },
+    { ...bought, at: 'gisteren' },
+  ];
+  for (const purchase of bad) assert.throws(() => logic.parseState(JSON.stringify({ cards: [], purchases: [purchase] })), JSON.stringify(purchase));
 });
 
 test('parseState rejects anything that is not our shape', () => {
