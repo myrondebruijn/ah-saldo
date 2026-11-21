@@ -9,7 +9,7 @@ const KEY = 'ah-saldo'; // the app's first name; changing this key would hide ev
 const CHECKER = 'https://service2.loyaltyinabox.com/CardBalanceChecker/2/paymentapi.aspx?cmd=showbalance&username=1379001&lang=nl-NL';
 const KIND = { start: 'Beginsaldo', pay: 'Betaling', correct: 'Correctie' };
 const US = 'Wij'; // who a purchase is for until someone else is chosen
-const SHOPS = ['AH', 'Jumbo', 'Plus', 'Lidl', 'Aldi'];
+const SHOPS = ['AH', 'Plus', 'Jumbo', 'Dirk', 'Anders'];
 const UNITS = { week: 'Week', month: 'Maand', year: 'Jaar' };
 const SPAN = { week: 8, month: 6, year: 4 }; // how many periods the chart shows
 
@@ -65,7 +65,6 @@ const purchaseById = (id) => state.purchases.find((purchase) => purchase.id === 
 // the defaults first, then what has been used so far, most recent first
 const listed = (defaults, used) => [...new Set([...defaults, ...used.reverse()])];
 const people = () => listed([US], state.purchases.flatMap((purchase) => purchase.shares.map((share) => share.who)));
-const shops = () => listed(SHOPS, state.purchases.map((purchase) => purchase.store));
 const whoText = (purchase) => purchase.shares.map((share) => share.who).join(', ');
 
 function expiryLabel(card) {
@@ -655,9 +654,11 @@ async function editPurchase(purchase) {
   const field = form.elements;
   form.reset();
   $('purchaseTitle').textContent = purchase ? 'Uitgave bewerken' : 'Uitgave toevoegen';
-  $('storeList').innerHTML = shops().map((shop) => `<option value="${esc(shop)}">`).join('');
+  // a purchase saved with a shop from before this list keeps that shop
+  const choices = purchase && !SHOPS.includes(purchase.store) ? [...SHOPS, purchase.store] : SHOPS;
+  field.store.innerHTML = choices.map((shop) => `<option>${esc(shop)}</option>`).join('');
   // a new purchase starts with the shop of the last one that was paid without cards
-  field.store.value = purchase ? purchase.store : state.purchases.findLast((each) => !each.cards)?.store ?? '';
+  field.store.value = purchase?.store ?? state.purchases.findLast((each) => !each.cards && SHOPS.includes(each.store))?.store ?? SHOPS[0];
   const before = isoDate(new Date(purchase?.at ?? Date.now()));
   field.total.value = purchase ? euroInput(purchase.total) : '';
   field.date.value = before;

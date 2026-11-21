@@ -19,6 +19,7 @@
     <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
     <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></symbol>
     <symbol id="i-next" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></symbol>
+    <symbol id="i-updown" viewBox="0 0 24 24"><path d="M8 9l4-4 4 4M8 15l4 4 4-4"/></symbol>
     <symbol id="i-out" viewBox="0 0 24 24"><path d="M8 16l8-8M9 8h7v7"/></symbol>
     <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
     <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 4h4M6 7l.9 12.2A2 2 0 0 0 8.9 21h6.2a2 2 0 0 0 2-1.8L18 7M10 11v6M14 11v6"/></symbol>
@@ -80,7 +81,8 @@
       </header>
       <div class="group">
         <label class="field">Winkel
-          <input name="store" autocomplete="off" maxlength="30" list="storeList" placeholder="AH, Jumbo, Plus…">
+          <select name="store"></select>
+          <svg class="icon" aria-hidden="true"><use href="#i-updown"/></svg>
         </label>
         <label class="field">Bedrag
           <input name="total" inputmode="decimal" autocomplete="off" placeholder="0,00">
@@ -89,7 +91,6 @@
           <input name="date" type="date">
         </label>
       </div>
-      <datalist id="storeList"></datalist>
       <p class="error" role="alert"></p>
     </form>
   </dialog>
