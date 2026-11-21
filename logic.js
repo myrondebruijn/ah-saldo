@@ -14,8 +14,7 @@ export function parseEuro(text) {
   return match && Number(match[1]) * 100 + Number((match[2] ?? '').padEnd(2, '0'));
 }
 
-const euro = new Intl.NumberFormat('nl-NL', { style: 'currency', currency: 'EUR' });
-export const formatEuro = (cents) => euro.format(cents / 100);
+export const formatEuro = (cents, locale = 'nl-NL') => (cents / 100).toLocaleString(locale, { style: 'currency', currency: 'EUR' });
 
 // a card's balance is the sum of its entries; the first entry is the starting balance
 export const balance = (card) => card.entries.reduce((sum, entry) => sum + entry.delta, 0);

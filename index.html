@@ -35,21 +35,21 @@
   <dialog id="cardDialog" class="sheet" aria-labelledby="cardTitle">
     <form method="dialog" novalidate>
       <header class="sheet-bar">
-        <button type="button" class="text-button" data-action="close">Annuleren</button>
+        <button type="button" class="text-button" data-action="close" data-en="Cancel">Annuleren</button>
         <h2 id="cardTitle"></h2>
-        <button class="text-button strong" value="ok">Opslaan</button>
+        <button class="text-button strong" value="ok" data-en="Save">Opslaan</button>
       </header>
       <div class="group">
-        <label class="field">Kaartnummer
-          <input name="number" inputmode="numeric" autocomplete="off" placeholder="19 cijfers">
+        <label class="field"><span data-en="Card number">Kaartnummer</span>
+          <input name="number" inputmode="numeric" autocomplete="off" placeholder="19 cijfers" data-en="19 digits">
         </label>
-        <label class="field">Beveiligingscode
-          <input name="code" inputmode="numeric" autocomplete="off" placeholder="6 cijfers">
+        <label class="field"><span data-en="Security code">Beveiligingscode</span>
+          <input name="code" inputmode="numeric" autocomplete="off" placeholder="6 cijfers" data-en="6 digits">
         </label>
-        <label class="field">Saldo
-          <input name="start" inputmode="decimal" autocomplete="off" placeholder="25,00">
+        <label class="field"><span data-en="Balance">Saldo</span>
+          <input name="start" inputmode="decimal" autocomplete="off" placeholder="25,00" data-en="25.00">
         </label>
-        <label class="field">Geldig tot (optioneel)
+        <label class="field"><span data-en="Valid until (optional)">Geldig tot (optioneel)</span>
           <input name="expiry" type="date">
         </label>
       </div>
@@ -60,13 +60,13 @@
   <dialog id="amountDialog" class="sheet" aria-labelledby="amountTitle">
     <form method="dialog" novalidate>
       <header class="sheet-bar">
-        <button type="button" class="text-button" data-action="close">Annuleren</button>
+        <button type="button" class="text-button" data-action="close" data-en="Cancel">Annuleren</button>
         <h2 id="amountTitle"></h2>
-        <button class="text-button strong" value="ok">Opslaan</button>
+        <button class="text-button strong" value="ok" data-en="Save">Opslaan</button>
       </header>
       <label class="amount-field"><span id="amountLabel"></span>
         <span class="amount-input"><span aria-hidden="true">€</span>
-          <input name="amount" inputmode="decimal" autocomplete="off" placeholder="0,00" autofocus></span>
+          <input name="amount" inputmode="decimal" autocomplete="off" placeholder="0,00" data-en="0.00" autofocus></span>
       </label>
       <p class="error" role="alert"></p>
     </form>
@@ -75,19 +75,19 @@
   <dialog id="purchaseDialog" class="sheet" aria-labelledby="purchaseTitle">
     <form method="dialog" novalidate>
       <header class="sheet-bar">
-        <button type="button" class="text-button" data-action="close">Annuleren</button>
+        <button type="button" class="text-button" data-action="close" data-en="Cancel">Annuleren</button>
         <h2 id="purchaseTitle"></h2>
-        <button class="text-button strong" value="ok">Opslaan</button>
+        <button class="text-button strong" value="ok" data-en="Save">Opslaan</button>
       </header>
       <div class="group">
-        <label class="field">Winkel
+        <label class="field"><span data-en="Shop">Winkel</span>
           <select name="store"></select>
           <svg class="icon" aria-hidden="true"><use href="#i-updown"/></svg>
         </label>
-        <label class="field">Bedrag
-          <input name="total" inputmode="decimal" autocomplete="off" placeholder="0,00">
+        <label class="field"><span data-en="Amount">Bedrag</span>
+          <input name="total" inputmode="decimal" autocomplete="off" placeholder="0,00" data-en="0.00">
         </label>
-        <label class="field">Datum
+        <label class="field"><span data-en="Date">Datum</span>
           <input name="date" type="date">
         </label>
       </div>
@@ -98,17 +98,17 @@
   <dialog id="whoDialog" class="sheet" aria-labelledby="whoTitle">
     <form method="dialog" novalidate>
       <header class="sheet-bar">
-        <button type="button" class="text-button" data-action="close">Annuleren</button>
-        <h2 id="whoTitle">Voor wie?</h2>
-        <button class="text-button strong" value="ok">Opslaan</button>
+        <button type="button" class="text-button" data-action="close" data-en="Cancel">Annuleren</button>
+        <h2 id="whoTitle" data-en="For whom?">Voor wie?</h2>
+        <button class="text-button strong" value="ok" data-en="Save">Opslaan</button>
       </header>
       <p class="group-note" id="whoNote"></p>
       <div class="group" id="whoNames"></div>
       <div class="group">
-        <label class="row"><span class="row-main">Verdelen</span>
+        <label class="row"><span class="row-main" data-en="Split">Verdelen</span>
           <input type="checkbox" name="split" class="switch" role="switch"></label>
       </div>
-      <p class="group-note" id="whoHint">Typ bij Verdelen een bedrag achter een naam. De naam met het vinkje krijgt de rest.</p>
+      <p class="group-note" id="whoHint" data-en="With Split on, type an amount next to a name. The name with the check mark gets the rest.">Typ bij Verdelen een bedrag achter een naam. De naam met het vinkje krijgt de rest.</p>
       <p class="error" role="alert"></p>
     </form>
   </dialog>
@@ -119,7 +119,7 @@
         <p id="confirmText"></p>
         <button id="confirmOk" class="row danger" value="ok"></button>
       </div>
-      <button type="button" class="row" data-action="close" autofocus>Annuleren</button>
+      <button type="button" class="row" data-action="close" autofocus data-en="Cancel">Annuleren</button>
     </form>
   </dialog>
 </body>

@@ -19,6 +19,7 @@ test('parseEuro reads amounts as cents and rejects everything else', () => {
 
 test('formatEuro writes Dutch amounts', () => {
   assert.equal(logic.formatEuro(1250).replace(/\s/g, ' '), '€ 12,50');
+  assert.equal(logic.formatEuro(1250, 'en-GB'), '€12.50');
 });
 
 test('balance is the sum of the entries', () => {
