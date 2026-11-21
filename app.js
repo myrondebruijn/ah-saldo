@@ -837,6 +837,11 @@ addEventListener('hashchange', () => {
   tapped = false;
 });
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', render);
+// The iPhone keyboard can slide the visible area down past a sheet's fields (it scrolls to a field that
+// was still below the screen while the sheet rose); style.css moves the sheets along by this much.
+const pan = () => document.documentElement.style.setProperty('--pan', `${visualViewport.offsetTop}px`);
+visualViewport?.addEventListener('scroll', pan);
+visualViewport?.addEventListener('resize', pan);
 
 navigator.storage?.persist?.(); // ask the browser not to evict the cards
 navigator.serviceWorker?.register('sw.js');
