@@ -1,6 +1,6 @@
 import {
-  balance, cleanDigits, daysLeft, expiryState, formatEuro, groupNumber, isDate, isoDate,
-  needsInstall, parseEuro, parseState, sortCards, validCode, validNumber,
+  balance, cleanDigits, code128, daysLeft, expiryState, formatEuro, groupNumber, isDate, isoDate,
+  needsInstall, parseEuro, parseState, settle, sortCards, validCode, validNumber,
 } from './logic.js';
 
 const KEY = 'ah-saldo';
@@ -11,6 +11,7 @@ const KIND = { start: 'Beginsaldo', pay: 'Betaling', correct: 'Correctie' };
 const $ = (id) => document.getElementById(id);
 const app = $('app');
 const standalone = navigator.standalone || matchMedia('(display-mode: standalone)').matches;
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
 
 let state;
 
@@ -39,10 +40,12 @@ function save() {
   render();
 }
 
-// ---------- views ----------
+// ---------- screens ----------
 // Everything interpolated into HTML below is digits, a date, a generated id or fixed text:
 // the forms and parseState let nothing else into the state.
+// Each screen returns its HTML and, optionally, the buttons for the dock at the thumb.
 
+const icon = (name) => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
 const last4 = (card) => `•••• ${card.number.slice(-4)}`;
 const formatDate = (iso, timeZone) =>
   new Date(iso).toLocaleDateString('nl-NL', { day: 'numeric', month: 'short', year: 'numeric', timeZone });
@@ -57,110 +60,262 @@ function expiryLabel(card) {
   return `Geldig tot ${formatDate(card.expiry, 'UTC')}`;
 }
 
-const tile = (card) => `
-  <li><a class="tile ${balance(card) > 0 ? expiryState(card.expiry, isoDate()) : 'spent'}" href="#/kaart/${card.id}">
-    <span>${last4(card)}</span>
-    <span class="tile-balance">${formatEuro(balance(card))}</span>
-    <span class="tile-expiry">${expiryLabel(card)}</span>
-  </a></li>`;
-
-function homeView() {
-  const active = sortCards(state.cards.filter((card) => balance(card) > 0));
-  const spent = state.cards.length - active.length;
-  const total = active.reduce((sum, card) => sum + balance(card), 0);
-  return `
-    <header>
-      <h1>AH Saldo</h1>
-      <p class="total">${formatEuro(total)}</p>
-      <p class="muted">${active.length} ${active.length === 1 ? 'kaart' : 'kaarten'}</p>
-    </header>
-    ${state.needsBackup ? `
-      <p class="notice">Je hebt nieuwe kaarten zonder back-up.
-        <button data-action="export">Back-up maken</button></p>` : ''}
-    ${active.length
-      ? `<ul class="tiles">${active.map(tile).join('')}</ul>`
-      : '<p class="blank">Nog geen kaarten. Voeg je eerste AH cadeaukaart toe.</p>'}
-    <button class="primary wide" data-action="add">Kaart toevoegen</button>
-    ${spent ? `<a class="link" href="#/archief">Lege kaarten (${spent})</a>` : ''}
-    <section class="backup">
-      <h2>Back-up</h2>
-      <p class="muted">Je kaarten staan alleen op deze telefoon. Het back-upbestand bevat alle nummers
-        en codes: bewaar het als contant geld.</p>
-      <div class="row">
-        <button data-action="export">Back-up maken</button>
-        <button data-action="import">Terugzetten</button>
-      </div>
-    </section>`;
+// plain text while there is time, a coloured pill once the date needs attention
+function expiryHtml(card) {
+  const label = expiryLabel(card);
+  const urgency = expiryState(card.expiry, isoDate());
+  if (!label) return '';
+  return urgency === 'ok' ? `<span class="when">${label}</span>` : `<span class="pill ${urgency}">${label}</span>`;
 }
 
-function cardView(card) {
-  const left = balance(card);
-  const history = [...card.entries].reverse().map((entry) => `
-    <li>
-      <span>${KIND[entry.kind]}<small>${formatDate(entry.at)}</small></span>
-      <span class="amount">${entry.kind === 'start' ? formatEuro(entry.delta) : signed(entry.delta)}</span>
-      ${entry.kind === 'start' ? '<span></span>' : `
-        <button class="icon" data-action="undo" data-entry="${entry.id}"
-          aria-label="${KIND[entry.kind]} van ${formatEuro(Math.abs(entry.delta))} verwijderen">✕</button>`}
-    </li>`).join('');
-  return `
-    <a class="link" href="${left > 0 ? '#/' : '#/archief'}">‹ ${left > 0 ? 'Kaarten' : 'Lege kaarten'}</a>
-    <h1>Kaart ${last4(card)}</h1>
-    <dl class="pass">
+// The card number as the barcode a till scans: black bars on white, with ten modules of white at each end.
+function barcode(card) {
+  let x = 10;
+  const bars = [...code128(card.number)].map((width, index) => {
+    const bar = index % 2 ? '' : `<rect x="${x}" width="${width}" height="1"/>`;
+    x += Number(width);
+    return bar;
+  }).join('');
+  return `<svg class="barcode" viewBox="0 0 ${x + 10} 1" preserveAspectRatio="none" role="img"
+    aria-label="Barcode van kaart ${last4(card)}">${bars}</svg>`;
+}
+
+// What the till needs from one card: barcode, number and code, on white.
+const ticket = (card) => `
+  <section class="ticket">
+    ${barcode(card)}
+    <dl>
       <dt>Kaartnummer</dt>
       <dd class="number">${groupNumber(card.number)}</dd>
       <dt>Beveiligingscode</dt>
       <dd class="code">${card.code}</dd>
     </dl>
-    <p class="total">${formatEuro(left)}</p>
-    <p class="expiry ${expiryState(card.expiry, isoDate())}">${expiryLabel(card)}</p>
-    <div class="actions">
-      ${left > 0 ? `
-        <button class="primary wide" data-action="pay">Betaald</button>
-        <button data-action="empty">Kaart is leeg</button>`
-      : '<p class="muted wide">Deze kaart is leeg en staat bij Lege kaarten.</p>'}
-      <button data-action="check">Saldo checken</button>
-      <button data-action="correct">Saldo corrigeren</button>
-      <button data-action="edit">Bewerken</button>
-      <button class="danger" data-action="delete">Verwijderen</button>
-    </div>
-    <h2>Geschiedenis</h2>
-    <ul class="history">${history}</ul>`;
-}
-
-function archiveView() {
-  const spent = state.cards.filter((card) => balance(card) <= 0);
-  return `
-    <a class="link" href="#/">‹ Kaarten</a>
-    <h1>Lege kaarten</h1>
-    ${spent.length ? `<ul class="tiles">${spent.map(tile).join('')}</ul>` : '<p class="blank">Geen lege kaarten.</p>'}`;
-}
-
-const installView = () => `
-  <section class="install">
-    <h1>AH Saldo</h1>
-    <h2>Zet de app eerst op je beginscherm</h2>
-    <p>Safari kan de gegevens van een website na een week zonder gebruik wissen. Op je beginscherm
-      blijven je kaarten bewaard.</p>
-    <ol>
-      <li>Tik in Safari op <strong>Deel</strong> (het vierkant met de pijl omhoog).</li>
-      <li>Kies <strong>Zet op beginscherm</strong>.</li>
-      <li>Open AH Saldo vanaf je beginscherm.</li>
-    </ol>
   </section>`;
+
+const blank = (title, text = '') => `
+  <div class="blank">${icon('card')}<strong>${title}</strong>${text}</div>`;
+
+function homeScreen() {
+  const active = sortCards(state.cards.filter((card) => balance(card) > 0));
+  const spent = state.cards.length - active.length;
+  const total = active.reduce((sum, card) => sum + balance(card), 0);
+  // the first card is the one to use next, so it alone gets the blue pass
+  const passes = active.map((card, index) => `
+    <li><a class="pass${index ? '' : ' next'}" href="#/kaart/${card.id}">
+      <span>${last4(card)}</span>
+      <strong>${formatEuro(balance(card))}</strong>
+      ${expiryHtml(card)}
+    </a></li>`).join('');
+  return {
+    html: `
+      <header class="large-title">
+        <h1>AH Saldo</h1>
+        <button class="round" data-action="add" aria-label="Kaart toevoegen">${icon('plus')}</button>
+      </header>
+      <section class="summary">
+        <p class="footnote">Totaal saldo</p>
+        <p class="total">${formatEuro(total)}</p>
+        <p class="footnote">${active.length} ${active.length === 1 ? 'kaart' : 'kaarten'}</p>
+      </section>
+      ${state.needsBackup ? `
+        <div class="group">
+          <p class="row notice">${icon('warn')}<span class="row-main">Je hebt nieuwe kaarten zonder back&#8209;up.</span></p>
+          <button class="row tint" data-action="export">Back-up maken</button>
+        </div>` : ''}
+      <h2 class="section">Kaarten</h2>
+      ${active.length
+        ? `<ul class="passes">${passes}</ul>`
+        : blank('Nog geen kaarten', 'Voeg je eerste AH cadeaukaart toe.')}
+      ${spent ? `
+        <div class="group">
+          <a class="row" href="#/archief"><span class="row-main">Lege kaarten</span> ${spent}${icon('next')}</a>
+        </div>` : ''}
+      <h2 class="section">Back-up</h2>
+      <div class="group">
+        <button class="row tint" data-action="export">Back-up maken</button>
+        <button class="row tint" data-action="import">Terugzetten</button>
+      </div>
+      <p class="group-note">Je kaarten staan alleen op deze telefoon. Het back&#8209;upbestand bevat alle nummers
+        en codes: bewaar het als contant geld.</p>`,
+    // with cards the thumb button starts a payment; adding a card stays on the plus button above
+    dock: active.length
+      ? '<a class="button primary" href="#/betalen">Betalen</a>'
+      : '<button class="button primary" data-action="add">Kaart toevoegen</button>',
+  };
+}
+
+// ---------- paying at the till ----------
+// One payment walks through the cards in the order to use them. Nothing is saved until it is finished.
+// `queue` holds the card ids; `steps` has one entry per card already passed: true = the till emptied it, false = skipped.
+let paying = null;
+
+const cardById = (id) => state.cards.find((card) => card.id === id);
+const payCard = () => cardById(paying.queue[paying.steps.length]); // undefined once every card is passed
+const emptiedCards = () => paying.queue.filter((id, index) => paying.steps[index]).map(cardById);
+
+function payScreen() {
+  const card = payCard();
+  const back = paying.steps.length
+    ? `<button class="back" data-action="payBack">${icon('back')}Vorige</button>`
+    : `<a class="back" href="#/">${icon('back')}Kaarten</a>`;
+  if (!card) {
+    const used = emptiedCards().length;
+    return {
+      html: `
+        <header class="navbar">${back}<h1>Betalen</h1><span></span></header>
+        ${blank('Geen kaarten meer', used ? 'Betaal de rest met pin.' : '')}`,
+      dock: used ? '<button class="button primary" data-action="payRest">Klaar</button>' : '',
+    };
+  }
+  return {
+    html: `
+      <header class="navbar">
+        ${back}
+        <h1><span>Kaart </span>${paying.steps.length + 1} van ${paying.queue.length}</h1>
+        <button class="text-button" data-action="paySkip">Overslaan</button>
+      </header>
+      ${ticket(card)}
+      <div class="saldo">
+        <p class="total">${formatEuro(balance(card))}</p>
+        ${expiryHtml(card)}
+      </div>`,
+    dock: `
+      <button class="button" data-action="payNext">Volgende kaart</button>
+      <button class="button primary" data-action="payDone">Klaar</button>`,
+  };
+}
+
+// Records a finished payment; `total` is what was due when the cards covered it, or null when a rest went by pin.
+function finishPayment(cards, total) {
+  const taken = settle(cards.map(balance), total);
+  cards.forEach((card, index) => card.entries.push(newEntry('pay', -taken[index])));
+  save();
+  const sum = taken.reduce((all, cents) => all + cents, 0);
+  toast(`${formatEuro(sum)} afgeschreven van ${cards.length} ${cards.length === 1 ? 'kaart' : 'kaarten'}.`);
+  goHome();
+}
+
+function cardScreen(card) {
+  const left = balance(card);
+  const history = [...card.entries].reverse().map((entry) => `
+    <li class="row">
+      <span class="row-main">${KIND[entry.kind]} <small>${formatDate(entry.at)}</small></span>
+      ${entry.kind === 'start' ? formatEuro(entry.delta) : signed(entry.delta)}
+      ${entry.kind === 'start' ? '<span class="row-icon"></span>' : `
+        <button class="row-icon" data-action="undo" data-entry="${entry.id}"
+          aria-label="${KIND[entry.kind]} van ${formatEuro(Math.abs(entry.delta))} verwijderen">${icon('trash')}</button>`}
+    </li>`).join('');
+  return {
+    html: `
+      <header class="navbar">
+        <a class="back" href="${left > 0 ? '#/' : '#/archief'}">${icon('back')}${left > 0 ? 'Kaarten' : 'Lege kaarten'}</a>
+        <h1><span>Kaart </span>${last4(card)}</h1>
+        <button class="text-button" data-action="edit">Bewerken</button>
+      </header>
+      ${ticket(card)}
+      <div class="saldo">
+        <p class="total">${formatEuro(left)}</p>
+        ${expiryHtml(card)}
+      </div>
+      ${left > 0 ? '' : '<p class="group-note">Deze kaart is leeg en staat bij Lege kaarten.</p>'}
+      <div class="group">
+        <button class="row tint" data-action="check"><span class="row-main">Saldo checken</span>${icon('out')}</button>
+        <button class="row tint" data-action="correct">Saldo corrigeren</button>
+      </div>
+      <h2 class="section">Geschiedenis</h2>
+      <ul class="group">${history}</ul>
+      <div class="group">
+        <button class="row danger" data-action="delete">Verwijderen</button>
+      </div>`,
+    dock: left > 0 ? `
+      <button class="button" data-action="empty">Kaart is leeg</button>
+      <button class="button primary" data-action="pay">Betaald</button>` : '',
+  };
+}
+
+function archiveScreen() {
+  const spent = state.cards.filter((card) => balance(card) <= 0);
+  const rows = spent.map((card) => `
+    <li><a class="row" href="#/kaart/${card.id}">
+      <span class="row-main">${last4(card)} <small>${expiryLabel(card)}</small></span>
+      ${formatEuro(balance(card))}${icon('next')}
+    </a></li>`).join('');
+  return {
+    html: `
+      <header class="navbar">
+        <a class="back" href="#/">${icon('back')}Kaarten</a>
+        <h1>Lege kaarten</h1>
+        <span></span>
+      </header>
+      ${spent.length ? `<ul class="group">${rows}</ul>` : blank('Geen lege kaarten')}`,
+  };
+}
+
+const installScreen = () => ({
+  html: `
+    <section class="install">
+      <img src="icon-180.png" alt="" width="88" height="88">
+      <h1>Zet de app eerst op je beginscherm</h1>
+      <p>Safari kan de gegevens van een website na een week zonder gebruik wissen. Op je beginscherm
+        blijven je kaarten bewaard.</p>
+      <ol class="group steps">
+        <li class="row"><b aria-hidden="true">1</b><span>Tik in Safari op <strong>Deel</strong> (het vierkant met de pijl omhoog).</span></li>
+        <li class="row"><b aria-hidden="true">2</b><span>Kies <strong>Zet op beginscherm</strong>.</span></li>
+        <li class="row"><b aria-hidden="true">3</b><span>Open AH Saldo vanaf je beginscherm.</span></li>
+      </ol>
+    </section>`,
+});
 
 function currentCard() {
   const [, name, id] = location.hash.split('/'); // "#/kaart/<id>"
   return name === 'kaart' ? state.cards.find((card) => card.id === id) : undefined;
 }
 
+// how deep the current address sits: list 0, archive or payment 1, card 2
+const depth = () => (location.hash.startsWith('#/kaart/') ? 2 : ['#/archief', '#/betalen'].includes(location.hash) ? 1 : 0);
+let shownDepth = 0;
+let tapped = false; // true when a tap inside the app caused the navigation
+
 function render() {
   const card = currentCard();
-  document.body.classList.toggle('pay', Boolean(card));
-  app.innerHTML = needsInstall(navigator.userAgent, standalone) ? installView()
-    : card ? cardView(card)
-    : location.hash === '#/archief' ? archiveView()
-    : homeView();
+  // a payment lives only while its screen is open; it starts with the cards in the order to use them
+  if (location.hash !== '#/betalen') paying = null;
+  else paying ??= { queue: sortCards(state.cards.filter((each) => balance(each) > 0)).map((each) => each.id), steps: [] };
+  const atTill = Boolean(card || paying?.queue.length); // the screens a till scanner reads stay white
+  const screen = needsInstall(navigator.userAgent, standalone) ? installScreen()
+    : card ? cardScreen(card)
+    : atTill ? payScreen()
+    : location.hash === '#/archief' ? archiveScreen()
+    : homeScreen();
+  document.body.classList.toggle('pay', atTill);
+  app.innerHTML = screen.html;
+  $('dock').innerHTML = screen.dock ?? '';
+  $('dock').hidden = !screen.dock;
+  shownDepth = depth();
+  // the iPhone status bar takes the colour of the screen below it
+  document.querySelector('meta[name="theme-color"]').content = getComputedStyle(document.body).backgroundColor;
+}
+
+// Draws the screen for the current address and lets screen readers and keyboards start at its top.
+function show() {
+  render();
+  scrollTo(0, 0);
+  app.focus({ preventScroll: true });
+}
+
+// Changes the screen with an iPhone-style slide ('push' forward, 'pop' back) where the browser can.
+function slide(nav, change) {
+  if (!document.startViewTransition || reducedMotion.matches) {
+    change();
+    return;
+  }
+  document.documentElement.dataset.nav = nav;
+  document.startViewTransition(change);
+}
+
+function goHome() {
+  tapped = depth() > 0;
+  location.hash = '#/';
 }
 
 // ---------- dialogs ----------
@@ -172,41 +327,63 @@ function toast(text) {
   toastTimer = setTimeout(() => { $('toast').textContent = ''; }, 4000);
 }
 
-// Shows a dialog; resolves true once its form is submitted and `check` returns no error message.
+// Lets a sheet slide away before it closes; CSS alone cannot animate a closing <dialog> in Safari.
+function closeDialog(dialog, value = '') {
+  if (reducedMotion.matches) {
+    dialog.close(value);
+    return;
+  }
+  dialog.classList.add('closing'); // style.css runs the slide; without motion the branch above applies
+  dialog.addEventListener('animationend', () => {
+    dialog.classList.remove('closing');
+    dialog.close(value);
+  }, { once: true });
+}
+
+// Shows a dialog; resolves with how it closed: 'ok' once its form is submitted and `check` returns no error
+// message, the value of another button that closed it, or '' when cancelled.
 function openDialog(dialog, check = () => '') {
   const error = dialog.querySelector('.error');
   if (error) error.textContent = '';
   return new Promise((resolve) => {
     dialog.querySelector('form').onsubmit = (event) => {
+      event.preventDefault(); // closeDialog does the closing, after the slide
       const message = check();
-      if (!message) return;
-      event.preventDefault();
-      error.textContent = message;
+      if (message) error.textContent = message;
+      else closeDialog(dialog, 'ok');
     };
-    dialog.onclose = () => resolve(dialog.returnValue === 'ok');
+    dialog.oncancel = (event) => {
+      event.preventDefault();
+      closeDialog(dialog);
+    };
+    dialog.onclose = () => resolve(dialog.returnValue);
     dialog.returnValue = '';
     dialog.showModal();
   });
 }
 
-function ask(text, okLabel) {
+async function ask(text, okLabel) {
   $('confirmText').textContent = text;
   $('confirmOk').textContent = okLabel;
-  return openDialog($('confirmDialog'));
+  return await openDialog($('confirmDialog')) === 'ok';
 }
 
 // Resolves with the entered amount in cents, or null when cancelled.
-async function askAmount(title, label, check = () => '') {
+// `other` adds a second way out, { label, note }: a button that resolves with 'other' instead of an amount.
+async function askAmount(title, label, check = () => '', other) {
   const form = $('amountDialog').querySelector('form');
   form.reset();
   $('amountTitle').textContent = title;
   $('amountLabel').textContent = label;
+  $('amountOther').hidden = !other;
+  $('amountOther').querySelector('button').textContent = other?.label ?? '';
+  $('amountOther').querySelector('p').textContent = other?.note ?? '';
   let cents;
-  const ok = await openDialog($('amountDialog'), () => {
+  const answer = await openDialog($('amountDialog'), () => {
     cents = parseEuro(form.elements.amount.value);
     return cents === null ? 'Vul een bedrag in, bijvoorbeeld 12,50.' : check(cents);
   });
-  return ok ? cents : null;
+  return answer === 'ok' ? cents : answer || null;
 }
 
 // ---------- actions ----------
@@ -226,7 +403,7 @@ async function editCard(card) {
     field.expiry.value = card.expiry;
   }
   let next;
-  const ok = await openDialog($('cardDialog'), () => {
+  const answer = await openDialog($('cardDialog'), () => {
     next = {
       number: cleanDigits(field.number.value),
       code: cleanDigits(field.code.value),
@@ -240,7 +417,7 @@ async function editCard(card) {
     if (next.expiry && !isDate(next.expiry)) return 'Vul een geldige datum in.';
     return '';
   });
-  if (!ok) return;
+  if (answer !== 'ok') return;
   const { number, code, expiry, start } = next;
   if (!card) {
     state.cards.push({ id: crypto.randomUUID(), number, code, expiry, entries: [newEntry('start', start)] });
@@ -258,7 +435,7 @@ function spend(card, cents) {
   toast(balance(card) > 0
     ? `${formatEuro(cents)} afgeschreven van ${last4(card)}.`
     : `${last4(card)} is leeg en staat bij Lege kaarten.`);
-  location.hash = '#/'; // back to the list, where the next card to use is on top
+  goHome(); // back to the list, where the next card to use is on top
 }
 
 async function exportBackup() {
@@ -296,14 +473,38 @@ async function importBackup() {
   if (!sure) return;
   state = { cards: next.cards, needsBackup: false };
   save();
-  location.hash = '#/';
+  goHome();
 }
 
 // Each action gets the card of the current screen (if any) and the element that was tapped.
 const actions = {
   add: () => editCard(),
   edit: (card) => editCard(card),
-  close: (card, button) => button.closest('dialog').close(),
+  close: (card, button) => closeDialog(button.closest('dialog'), button.value), // Annuleren has no value
+
+  // one step of a payment: the till emptied this card, it was skipped, or the last step is taken back
+  payNext() { paying.steps.push(true); slide('push', show); },
+  paySkip() { paying.steps.push(false); slide('push', show); },
+  payBack() { paying.steps.pop(); slide('pop', show); },
+  payRest: () => finishPayment(emptiedCards(), null),
+
+  async payDone() {
+    const cards = [...emptiedCards(), payCard()];
+    const balances = cards.map(balance);
+    const earlier = balances.slice(0, -1).reduce((sum, cents) => sum + cents, 0);
+    const several = cards.length > 1;
+    const answer = await askAmount('Afronden', 'Totaalbedrag (alles met kaarten betaald)', (total) => {
+      const taken = settle(balances, total);
+      if (taken === 'high') {
+        return `Dat is meer dan er op ${several ? 'deze kaarten' : 'deze kaart'} stond (${formatEuro(earlier + balances.at(-1))}). Kies dan Rest met pin betaald.`;
+      }
+      if (taken === 'low') {
+        return earlier ? `Dat dekten de vorige kaarten al (${formatEuro(earlier)}). Ga terug met Vorige.` : 'Vul een bedrag in, bijvoorbeeld 12,50.';
+      }
+      return '';
+    }, { label: 'Rest met pin betaald', note: several ? 'Dan zijn alle gebruikte kaarten leeg.' : 'Dan is deze kaart leeg.' });
+    if (answer !== null) finishPayment(cards, answer === 'other' ? null : answer);
+  },
   export: exportBackup,
   import: () => $('importFile').click(),
   empty: (card) => spend(card, balance(card)),
@@ -339,7 +540,7 @@ const actions = {
     if (!sure) return;
     state.cards = state.cards.filter((other) => other !== card);
     save();
-    location.hash = '#/';
+    goHome();
   },
 
   async undo(card, button) {
@@ -360,15 +561,22 @@ const actions = {
 };
 
 document.addEventListener('click', (event) => {
+  if (event.target.closest('a[href^="#/"]')) tapped = true;
+  if (event.target.matches('.action-sheet')) closeDialog(event.target); // a tap on the dimmed area cancels
   const target = event.target.closest('[data-action]');
   if (target) actions[target.dataset.action](currentCard(), target);
 });
 $('importFile').addEventListener('change', importBackup);
+
 addEventListener('hashchange', () => {
-  render();
-  scrollTo(0, 0);
-  app.focus(); // lets screen readers and keyboards start at the new screen
+  const next = depth();
+  const nav = next > shownDepth ? 'push' : next < shownDepth ? 'pop' : '';
+  // slide only after a tap in the app: the iPhone back gesture brings its own animation
+  if (tapped && nav) slide(nav, show);
+  else show();
+  tapped = false;
 });
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', render);
 
 navigator.storage?.persist?.(); // ask the browser not to evict the cards
 navigator.serviceWorker?.register('sw.js');

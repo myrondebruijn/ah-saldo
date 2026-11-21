@@ -6,8 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="robots" content="noindex">
   <title>AH Saldo</title>
-  <meta name="theme-color" content="#f2f4f7" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#0d1117" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f2f2f7">
   <meta name="apple-mobile-web-app-title" content="AH Saldo">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon-192.png">
@@ -16,54 +15,72 @@
   <script type="module" src="app.js"></script>
 </head>
 <body>
+  <svg class="sprite" aria-hidden="true">
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></symbol>
+    <symbol id="i-next" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></symbol>
+    <symbol id="i-out" viewBox="0 0 24 24"><path d="M8 16l8-8M9 8h7v7"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 4h4M6 7l.9 12.2A2 2 0 0 0 8.9 21h6.2a2 2 0 0 0 2-1.8L18 7M10 11v6M14 11v6"/></symbol>
+    <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 9v4M12 17h.01M10.3 4.2L2.4 18a2 2 0 0 0 1.7 3h15.8a2 2 0 0 0 1.7-3L13.7 4.2a2 2 0 0 0-3.4 0z"/></symbol>
+    <symbol id="i-card" viewBox="0 0 24 24"><rect x="2.5" y="5" width="19" height="14" rx="3"/><path d="M2.5 10h19M6.5 15h4"/></symbol>
+  </svg>
+
   <main id="app" tabindex="-1"></main>
+  <div id="dock" hidden></div>
   <p id="toast" role="status"></p>
   <input id="importFile" type="file" accept=".json,application/json" hidden>
 
-  <dialog id="cardDialog" aria-labelledby="cardTitle">
+  <dialog id="cardDialog" class="sheet" aria-labelledby="cardTitle">
     <form method="dialog" novalidate>
-      <h2 id="cardTitle"></h2>
-      <label>Kaartnummer
-        <input name="number" inputmode="numeric" autocomplete="off" placeholder="19 cijfers">
-      </label>
-      <label>Beveiligingscode
-        <input name="code" inputmode="numeric" autocomplete="off" placeholder="6 cijfers">
-      </label>
-      <label>Saldo
-        <input name="start" inputmode="decimal" autocomplete="off" placeholder="25,00">
-      </label>
-      <label>Geldig tot (optioneel)
-        <input name="expiry" type="date">
+      <header class="sheet-bar">
+        <button type="button" class="text-button" data-action="close">Annuleren</button>
+        <h2 id="cardTitle"></h2>
+        <button class="text-button strong" value="ok">Opslaan</button>
+      </header>
+      <div class="group">
+        <label class="field">Kaartnummer
+          <input name="number" inputmode="numeric" autocomplete="off" placeholder="19 cijfers" autofocus>
+        </label>
+        <label class="field">Beveiligingscode
+          <input name="code" inputmode="numeric" autocomplete="off" placeholder="6 cijfers">
+        </label>
+        <label class="field">Saldo
+          <input name="start" inputmode="decimal" autocomplete="off" placeholder="25,00">
+        </label>
+        <label class="field">Geldig tot (optioneel)
+          <input name="expiry" type="date">
+        </label>
+      </div>
+      <p class="error" role="alert"></p>
+    </form>
+  </dialog>
+
+  <dialog id="amountDialog" class="sheet" aria-labelledby="amountTitle">
+    <form method="dialog" novalidate>
+      <header class="sheet-bar">
+        <button type="button" class="text-button" data-action="close">Annuleren</button>
+        <h2 id="amountTitle"></h2>
+        <button class="text-button strong" value="ok">Opslaan</button>
+      </header>
+      <label class="amount-field"><span id="amountLabel"></span>
+        <span class="amount-input"><span aria-hidden="true">€</span>
+          <input name="amount" inputmode="decimal" autocomplete="off" placeholder="0,00" autofocus></span>
       </label>
       <p class="error" role="alert"></p>
-      <div class="row">
-        <button type="button" data-action="close">Annuleren</button>
-        <button class="primary" value="ok">Opslaan</button>
+      <div id="amountOther" hidden>
+        <div class="group"><button type="button" class="row tint" data-action="close" value="other"></button></div>
+        <p class="group-note"></p>
       </div>
     </form>
   </dialog>
 
-  <dialog id="amountDialog" aria-labelledby="amountTitle">
-    <form method="dialog" novalidate>
-      <h2 id="amountTitle"></h2>
-      <label><span id="amountLabel"></span>
-        <input name="amount" inputmode="decimal" autocomplete="off" placeholder="12,50">
-      </label>
-      <p class="error" role="alert"></p>
-      <div class="row">
-        <button type="button" data-action="close">Annuleren</button>
-        <button class="primary" value="ok">Opslaan</button>
-      </div>
-    </form>
-  </dialog>
-
-  <dialog id="confirmDialog" aria-labelledby="confirmText">
+  <dialog id="confirmDialog" class="action-sheet" aria-labelledby="confirmText">
     <form method="dialog">
-      <p id="confirmText"></p>
-      <div class="row">
-        <button type="button" data-action="close">Annuleren</button>
-        <button id="confirmOk" class="danger" value="ok"></button>
+      <div class="group">
+        <p id="confirmText"></p>
+        <button id="confirmOk" class="row danger" value="ok"></button>
       </div>
+      <button type="button" class="row" data-action="close" autofocus>Annuleren</button>
     </form>
   </dialog>
 </body>

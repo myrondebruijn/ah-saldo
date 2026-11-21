@@ -54,6 +54,33 @@ test('sortCards puts soonest expiry first, undated last, lowest balance first on
   assert.deepEqual(logic.sortCards(cards).map((c) => c.id), ['soon-small', 'soon-big', 'late', 'undated']);
 });
 
+test('settle works out what a payment took from each card', () => {
+  assert.deepEqual(logic.settle([1270], 500), [500]); // one card, part used
+  assert.deepEqual(logic.settle([1270], 1270), [1270]); // one card, exactly emptied
+  assert.deepEqual(logic.settle([1270, 5000], 3000), [1270, 1730]); // first emptied, second pays the rest
+  assert.deepEqual(logic.settle([1270, 5000], null), [1270, 5000]); // a rest went by pin: all empty
+  assert.equal(logic.settle([1270, 5000], 1270), 'low'); // the first card alone covered it
+  assert.equal(logic.settle([1270], 0), 'low');
+  assert.equal(logic.settle([1270, 5000], 6271), 'high'); // more than the cards held
+});
+
+test('CODE128 table is well formed', () => {
+  assert.equal(logic.CODE128.length, 107);
+  assert.equal(new Set(logic.CODE128).size, 107);
+  const modules = (pattern) => [...pattern].reduce((sum, width) => sum + Number(width), 0);
+  logic.CODE128.forEach((pattern, value) => assert.equal(modules(pattern), value === 106 ? 13 : 11, `value ${value}`));
+});
+
+test('code128 packs digit pairs in set C and an odd last digit in set B, with the checksum', () => {
+  // start C, 12, 34, checksum (105 + 12*1 + 34*2) % 103 = 82, stop
+  assert.equal(logic.code128('1234'), '211232' + '112232' + '131123' + '121241' + '2331112');
+  // start C, 12, switch to B, '3' (value 19), checksum (105 + 12 + 100*2 + 19*3) % 103 = 65, stop
+  assert.equal(logic.code128('123'), '211232' + '112232' + '114131' + '221132' + '121124' + '2331112');
+  // a 19-digit card number: 13 symbols of 11 modules plus the 13-module stop
+  const modules = [...logic.code128('1234567890123456789')].reduce((sum, width) => sum + Number(width), 0);
+  assert.equal(modules, 156);
+});
+
 test('needsInstall only insists on an iPhone outside the Home Screen', () => {
   const iphone = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Safari/604.1';
   assert.ok(logic.needsInstall(iphone, false));

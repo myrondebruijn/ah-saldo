@@ -1,0 +1,6 @@
+# This repository is public and GitHub Pages serves every file in it.
+# Design notes and tool output stay on this machine unless the owner decides otherwise.
+PRODUCT.md
+DESIGN.md
+.impeccable/
+.playwright-mcp/
