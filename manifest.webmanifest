@@ -1,7 +1,7 @@
 {
-  "name": "AH Saldo",
-  "short_name": "AH Saldo",
-  "description": "Houd het saldo van je AH cadeaukaarten bij.",
+  "name": "Kassa",
+  "short_name": "Kassa",
+  "description": "Betaal met je AH cadeaukaarten en houd je boodschappen bij.",
   "lang": "nl",
   "start_url": "./",
   "scope": "./",

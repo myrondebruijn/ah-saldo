@@ -1,4 +1,4 @@
-/* AH Saldo: iPhone conventions played straight.
+/* Kassa: iPhone conventions played straight.
    Colours are variables on body, so the pay screen can force the light set. */
 body {
   --bg: #f2f2f7; --cell: #fff; --label: #000; --label2: #6c6c70; --line: #c6c6c8; --fill: #ececf1;

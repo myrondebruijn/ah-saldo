@@ -4,7 +4,7 @@ import {
   validCode, validNumber,
 } from './logic.js';
 
-const KEY = 'ah-saldo';
+const KEY = 'ah-saldo'; // the app's first name; changing this key would hide everything already saved
 // AH's official "Saldochecker AH cadeaukaart" link, as published on ah.nl
 const CHECKER = 'https://service2.loyaltyinabox.com/CardBalanceChecker/2/paymentapi.aspx?cmd=showbalance&username=1379001&lang=nl-NL';
 const KIND = { start: 'Beginsaldo', pay: 'Betaling', correct: 'Correctie' };
@@ -137,7 +137,7 @@ function homeScreen() {
   return {
     html: `
       <header class="large-title">
-        <h1>AH Saldo</h1>
+        <h1>Kassa</h1>
         <button class="round" data-action="add" aria-label="Kaart toevoegen">${icon('plus')}</button>
       </header>
       <section class="summary">
@@ -242,7 +242,7 @@ const installScreen = () => ({
       <ol class="group steps">
         <li class="row"><b aria-hidden="true">1</b><span>Tik in Safari op <strong>Deel</strong> (het vierkant met de pijl omhoog).</span></li>
         <li class="row"><b aria-hidden="true">2</b><span>Kies <strong>Zet op beginscherm</strong>.</span></li>
-        <li class="row"><b aria-hidden="true">3</b><span>Open AH Saldo vanaf je beginscherm.</span></li>
+        <li class="row"><b aria-hidden="true">3</b><span>Open Kassa vanaf je beginscherm.</span></li>
       </ol>
     </section>`,
 });
@@ -691,9 +691,9 @@ async function editPurchase(purchase) {
 }
 
 async function exportBackup() {
-  const name = `ah-saldo-backup-${isoDate()}.json`;
+  const name = `kassa-backup-${isoDate()}.json`;
   const { cards, purchases } = state;
-  const json = JSON.stringify({ app: 'ah-saldo', version: 1, exportedAt: new Date().toISOString(), cards, purchases }, null, 2);
+  const json = JSON.stringify({ app: 'kassa', version: 1, exportedAt: new Date().toISOString(), cards, purchases }, null, 2);
   const file = new File([json], name, { type: 'application/json' });
   try {
     if (navigator.canShare?.({ files: [file] })) {
@@ -716,7 +716,7 @@ async function importBackup() {
   try {
     next = parseState(await file.text());
   } catch {
-    toast('Dit is geen geldige AH Saldo back-up.');
+    toast('Dit is geen geldige back-up van Kassa.');
     return;
   }
   const sure = await ask(

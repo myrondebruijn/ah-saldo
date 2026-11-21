@@ -1,4 +1,4 @@
-// Pure logic for AH Saldo: no DOM and no storage, so logic.test.mjs can run it in Node.
+// Pure logic for Kassa: no DOM and no storage, so logic.test.mjs can run it in Node.
 
 const DAY = 86_400_000;
 const KINDS = ['start', 'pay', 'correct'];
