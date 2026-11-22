@@ -276,10 +276,11 @@ export function shiftMonth(month, by) {
 const forOthers = (shares) => (shares ?? []).reduce((sum, share) => sum + (share.who === US ? 0 : share.cents), 0);
 
 // The one shop whose gift cards the app holds itself. Buying one moves money onto a card, so it is not
-// spending: the money counts as groceries when the card pays at the till. Cards for other shops are spent
-// as far as the app can tell, and count on the day they are bought.
+// spending: the money counts as groceries when the card pays at the till.
 export const AH = 'Albert Heijn';
-const onCard = (tx, cat) => cat === 'cadeaukaarten' && tx.gift?.shop === AH;
+// The shops where a gift card is balance: AH, and every shop whose balance the user keeps (an account with
+// `shop`). A card for any other shop is spent as far as the app can tell, and counts on the day it is bought.
+export const heldShops = (bank) => new Set([AH, ...bank.accounts.filter((account) => account.shop).map((account) => account.shop)]);
 
 // What a gift card payment adds to the figures: only the part the cards paid, because the pin part is on the
 // bank statement. A share for someone else comes out of the card part first.
@@ -298,6 +299,7 @@ export function figures(bank, purchases, from, to) {
   const catOf = sorter(bank);
   const kinds = new Map(bank.cats.map((cat) => [cat.id, cat.kind]));
   const start = from > bank.since ? from : bank.since;
+  const held = heldShops(bank);
   const byCat = new Map();
   const moved = new Map();
   const result = { income: 0, spending: 0, open: 0, byCat, moved };
@@ -305,7 +307,7 @@ export function figures(bank, purchases, from, to) {
   for (const tx of bank.txs) {
     if (tx.date < start || tx.date >= to) continue;
     const cat = catOf(tx);
-    const kind = !cat ? (tx.cents < 0 ? 'out' : 'in') : onCard(tx, cat) ? 'none' : kinds.get(cat);
+    const kind = !cat ? (tx.cents < 0 ? 'out' : 'in') : cat === 'cadeaukaarten' && held.has(tx.gift?.shop) ? 'none' : kinds.get(cat);
     if (!cat) result.open++;
     if (kind === 'out') {
       const others = cat === 'boodschappen' ? forOthers(tx.shares) : 0;
@@ -429,6 +431,47 @@ export function giftGuesses(bank, paid) {
   }).sort((a, b) => a.off - b.off).map(({ shop, value }) => ({ shop, value }));
 }
 
+// ---------- a shop's balance ----------
+// Gift cards for a shop other than AH can be kept as a balance too: an account with `shop`, whose `balance` is
+// what the shop said was left at the end of the day `through`. What is paid from it are transactions of that
+// account, entered by hand or booked every month: account.monthly = [{ name, cents, day, next: 'YYYY-MM' }].
+
+const paid = (account, date, cents, name) => ({ id: `${account.id}.${crypto.randomUUID().slice(0, 8)}`, acc: account.id, date, cents, name, text: '' });
+
+// Starts keeping a shop's balance and returns its account, or undefined when the shop has one already.
+export function addBalance(bank, { shop, balance, through, monthly = [] }, now) {
+  if (heldShops(bank).has(shop)) return undefined;
+  const account = { id: `S-${crypto.randomUUID().slice(0, 8)}`, name: shop, bank: 'Saldo', shop, balance, through, uploaded: now,
+    monthly: monthly.map(({ name, cents, day, next }) => ({ name, cents, day, next })) };
+  bank.accounts.push(account);
+  return account;
+}
+
+// Books a payment from a shop's balance and returns it.
+export function payFrom(bank, account, date, cents, name) {
+  const tx = paid(account, date, cents, name);
+  bank.txs.push(tx);
+  return tx;
+}
+
+// The day a monthly payment is due next. A day its month does not have is that month's last day.
+export function dueOn({ day, next }) {
+  const days = new Date(Number(next.slice(0, 4)), Number(next.slice(5)), 0).getDate();
+  return `${next}-${String(Math.min(day, days)).padStart(2, '0')}`;
+}
+
+// Books what the balances pay every month, up to `today`, and returns the new transactions. Each month is
+// booked once: a payment that is removed afterwards stays away.
+export function catchUp(bank, today) {
+  const booked = [];
+  for (const account of bank.accounts) {
+    for (const each of account.monthly ?? []) {
+      for (; dueOn(each) <= today; each.next = shiftMonth(each.next, 1)) booked.push(payFrom(bank, account, dueOn(each), each.cents, each.name));
+    }
+  }
+  return booked;
+}
+
 // ---------- fixed costs ----------
 // A fixed cost is a counterparty that is paid every month. bank.fixed holds the user's answer per rule key:
 // true = it is one, false = it was suggested and declined.
@@ -477,8 +520,16 @@ export function fixedCosts(bank, month) {
 // An account's balance at the end of `date`: the newest balance known, less everything booked after that day.
 // A credit card has no balance in its file; there it is the sum of all its lines.
 // shortcut: this counts on the card's lines being complete from its first day; ask for the balance if a card ever starts halfway.
+// A shop's balance is known on one day. Payments and gift cards of later days move it from there; those of
+// that day and earlier were in it already, so they only say what it was before.
 export function balanceOn(bank, account, date = '9999') {
   const lines = bank.txs.filter((tx) => tx.acc === account.id);
+  if (account.shop) {
+    const cards = bank.txs.filter((tx) => tx.gift?.shop === account.shop).map((tx) => ({ date: tx.date, cents: tx.gift.value }));
+    return [...lines, ...cards].reduce((sum, move) => sum
+      + (move.date > account.through && move.date <= date ? move.cents : 0)
+      - (move.date > date && move.date <= account.through ? move.cents : 0), account.balance);
+  }
   const now = account.balance ?? lines.reduce((sum, tx) => sum + tx.cents, 0);
   return now - lines.reduce((sum, tx) => sum + (tx.date > date ? tx.cents : 0), 0);
 }
@@ -501,9 +552,15 @@ const isTx = (tx) => typeof tx?.id === 'string' && /^[\w.-]{1,120}$/.test(tx.id)
     && tx.shares.every((share) => isName(share?.who) && Number.isInteger(share.cents) && share.cents > 0)
     && tx.shares.reduce((sum, share) => sum + share.cents, 0) === -tx.cents))
   && (tx.gift === undefined || (tx.cents < 0 && isGift(tx.gift)));
+const isMonthly = (each) => isText(each?.name, 60) && each.name.length > 0 && Number.isInteger(each.cents) && each.cents < 0
+  && Number.isInteger(each.day) && each.day >= 1 && each.day <= 31 && /^\d{4}-(0[1-9]|1[0-2])$/.test(each.next);
+// what a starter file and the app itself may ask a shop's balance to be
+const isBalance = (each) => isName(each?.shop) && Number.isInteger(each.balance) && isDate(each.through)
+  && Array.isArray(each.monthly ?? []) && (each.monthly ?? []).every(isMonthly);
 const isAccount = (account) => isId(account?.id) && isName(account.name) && isText(account.bank ?? '', 20)
   && (account.balance === undefined || Number.isInteger(account.balance))
-  && (account.holder === undefined || isText(account.holder, 30)) && (account.card === undefined || account.card === true);
+  && (account.holder === undefined || isText(account.holder, 30)) && (account.card === undefined || account.card === true)
+  && (account.shop === undefined ? account.monthly === undefined : isBalance(account));
 const isSaved = (account) => isAccount(account) && (account.through === '' || isDate(account.through))
   && typeof account.uploaded === 'string' && !Number.isNaN(Date.parse(account.uploaded));
 const isCat = (cat) => isId(cat?.id) && isName(cat.name) && KINDS.includes(cat.kind)
@@ -521,9 +578,10 @@ export function parseBank(data) {
     && (data.since === '' || isDate(data.since));
   if (!ok) throw new Error('invalid bank data');
   return {
-    accounts: data.accounts.map(({ id, name, bank, balance, holder, card, through, uploaded }) => ({
+    accounts: data.accounts.map(({ id, name, bank, balance, holder, card, through, uploaded, shop, monthly = [] }) => ({
       id, name, bank: bank ?? '', through, uploaded,
       ...(balance !== undefined && { balance }), ...(holder && { holder }), ...(card && { card }),
+      ...(shop && { shop, monthly: monthly.map(({ name: what, cents, day, next }) => ({ name: what, cents, day, next })) }),
     })),
     txs: data.txs.map(({ id, acc, date, cents, name, text, iban, own, cat, shares, gift }) => ({
       id, acc, date, cents, name, text: text ?? '', ...(iban && { iban }), ...(own && { own }), ...(cat && { cat }),
@@ -538,15 +596,17 @@ export function parseBank(data) {
 // A starter file: everything prepared outside the app, added to what is there. It may hold bank files that
 // were read already (`files`, each as a reader returns it, read at the moment `at`), and categories, rules,
 // choices, names and gift cards: { files, at, cats, rules, fixed, since, names: account id -> name,
-// choices: transaction id -> category id, gifts: transaction id -> { shop, value } }
+// choices: transaction id -> category id, gifts: transaction id -> { shop, value },
+// balances: [{ shop, balance, through, monthly }] } - a shop's balance the app keeps already is left alone.
 // Returns how many transactions were new, or null, changing nothing, when the file is not that.
 export function addStarter(bank, starter, now) {
-  const { files = [], at = now, cats = [], rules = {}, fixed = {}, since = '', names = {}, choices = {}, gifts = {} } = starter ?? {};
+  const { files = [], at = now, cats = [], rules = {}, fixed = {}, since = '', names = {}, choices = {}, gifts = {}, balances = [] } = starter ?? {};
   const ok = starter?.kind === 'kassa-start' && Array.isArray(cats) && cats.every(isCat)
     && isRules(rules, isId) && isRules(fixed, (value) => typeof value === 'boolean') && (since === '' || isDate(since))
     && typeof names === 'object' && Object.values(names).every(isName)
     && typeof choices === 'object' && Object.values(choices).every(isId)
     && typeof gifts === 'object' && gifts !== null && Object.values(gifts).every(isGift)
+    && Array.isArray(balances) && balances.every(isBalance)
     && Array.isArray(files) && files.every((file) => Array.isArray(file?.accounts) && file.accounts.every(isAccount)
       && Array.isArray(file.txs) && file.txs.every(isTx))
     && (files.length === 0 || (typeof at === 'string' && !Number.isNaN(Date.parse(at))));
@@ -565,5 +625,6 @@ export function addStarter(bank, starter, now) {
     if (choices[tx.id]) tx.cat = choices[tx.id];
     if (gifts[tx.id] && tx.cents < 0) tx.gift = { shop: gifts[tx.id].shop, value: gifts[tx.id].value };
   }
+  for (const each of balances) addBalance(bank, each, now);
   return added;
 }

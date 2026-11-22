@@ -276,6 +276,45 @@ test('gift cards: the app guesses the shop and the value from what was paid befo
   assert.deepEqual(bank.giftGuesses(bank.emptyBank(), 4433), []);
 });
 
+test("a shop's balance: cards bought for it are balance, and what is paid from it is the spending", () => {
+  const wissel = (id, date, cents, shop, value) => tx({ id, date, cents, name: 'Wissel Nederland B.V.', gift: { shop, value } });
+  const data = withTxs(
+    wissel('w1', '2026-07-14', -1900, 'Speelwinkel', 2000),
+    wissel('w2', '2026-09-10', -3800, 'Speelwinkel', 4000),
+    wissel('w3', '2026-09-11', -4700, 'Boekenbon', 5000),
+  );
+  const spent = () => bank.figures(data, [], '2026-06-01', '2026-12-01');
+  assert.equal(spent().spending, 1900 + 3800 + 4700); // no balance is kept: every card is spent on the day it is bought
+  // the shop said 30,00 was left at the end of 1 September; 10,00 goes every month, on the 31st
+  const account = bank.addBalance(data, { shop: 'Speelwinkel', balance: 3000, through: '2026-09-01', monthly: [{ name: 'Spelpas', cents: -1000, day: 31, next: '2026-06' }] }, NOW);
+  assert.equal(bank.addBalance(data, { shop: 'Speelwinkel', balance: 1, through: '2026-09-01' }, NOW), undefined); // it is kept already
+  assert.equal(bank.addBalance(data, { shop: 'Albert Heijn', balance: 1, through: '2026-09-01' }, NOW), undefined); // AH has its cards
+  assert.deepEqual(bank.catchUp(data, '2026-09-30').map((each) => each.date), ['2026-06-30', '2026-07-31', '2026-08-31', '2026-09-30']); // June and September end on the 30th
+  assert.deepEqual(bank.catchUp(data, '2026-09-30'), []); // each month once
+  assert.equal(account.monthly[0].next, '2026-10');
+  assert.equal(bank.balanceOn(data, account, '2026-09-01'), 3000);
+  assert.equal(bank.balanceOn(data, account, '2026-09-10'), 7000); // the card of 40,00 came after that day
+  assert.equal(bank.balanceOn(data, account), 6000); // and the payment of 30 September
+  assert.equal(bank.balanceOn(data, account, '2026-08-30'), 4000); // before the payment of 31 August
+  assert.equal(bank.balanceOn(data, account, '2026-05-31'), 4000); // three payments and one card of 20,00 earlier
+  const after = spent();
+  assert.equal(after.spending, 4 * 1000 + 4700); // the payments, and the card for the other shop
+  assert.deepEqual([...after.moved], [['cadeaukaarten', -1900 - 3800]]);
+  // what the balance gained is the cards' worth less what was paid from it
+  assert.equal(bank.balanceOn(data, account) - bank.balanceOn(data, account, '2026-05-31'), 2000 + 4000 - 4 * 1000);
+  bank.payFrom(data, account, '2026-10-05', -500, 'Los spel');
+  assert.equal(bank.balanceOn(data, account), 5500);
+  data.txs = data.txs.filter((each) => each.name !== 'Spelpas' || each.date !== '2026-06-30'); // removed by hand
+  assert.deepEqual(bank.catchUp(data, '2026-10-30'), []); // it stays away, and October's 31st has not come
+  assert.equal(bank.catchUp(data, '2026-10-31').length, 1);
+  assert.deepEqual(bank.parseBank(JSON.parse(JSON.stringify(data))).accounts, data.accounts);
+  const bad = (change) => assert.throws(() => { const copy = JSON.parse(JSON.stringify(data)); change(copy.accounts[0]); bank.parseBank(copy); });
+  bad((copy) => { copy.monthly[0].cents = 1000; }); // money out only
+  bad((copy) => { copy.monthly[0].next = '2026-13'; });
+  bad((copy) => { delete copy.balance; });
+  bad((copy) => { delete copy.shop; }); // monthly payments belong to a shop's balance
+});
+
 test('groceries split between people: the household keeps its part, the rest is for others', () => {
   const data = withTxs(
     tx({ id: 'a', name: 'Jumbo Dorp', cents: -5000, shares: [{ who: 'Wij', cents: 3000 }, { who: 'Oma', cents: 1500 }, { who: 'Team', cents: 500 }] }),
@@ -368,6 +407,11 @@ test('a starter file adds categories, rules, names and choices, or nothing at al
   assert.equal(bank.addStarter(data, starter), 0); // it brought no transactions
   assert.deepEqual(data.txs.map((each) => each.gift?.value), [undefined, undefined, undefined, undefined, undefined, undefined, 5000, undefined]); // not on the salary
   assert.equal(bank.addStarter(data, { kind: 'kassa-start', gifts: { 'NL00TEST0123456789.17': { shop: 'Boekenbon' } } }), null);
+  const withBalance = { kind: 'kassa-start', balances: [{ shop: 'Boekenbon', balance: 1200, through: '2026-07-01', monthly: [{ name: 'Leesclub', cents: -500, day: 5, next: '2026-07' }] }] };
+  assert.equal(bank.addStarter(data, withBalance, NOW), 0);
+  assert.equal(bank.addStarter(data, { ...withBalance, balances: [{ ...withBalance.balances[0], balance: 1 }] }, NOW), 0); // a balance the app keeps is left alone
+  assert.deepEqual(data.accounts.filter((account) => account.shop).map((account) => [account.shop, account.balance, account.monthly.length]), [['Boekenbon', 1200, 1]]);
+  assert.equal(bank.addStarter(data, { kind: 'kassa-start', balances: [{ shop: 'Boekenbon', balance: 'veel', through: '2026-07-01' }] }, NOW), null);
   assert.equal(data.cats.length, bank.START_CATS.length + 1);
   assert.equal(data.cats.find((cat) => cat.id === 'fun').budget, 40000);
   assert.deepEqual([data.since, data.accounts[0].name, data.txs[4].cat, data.rules['voorbeeld b v']], ['2026-06-01', 'Betaalrekening', 'sport', 'salaris']);

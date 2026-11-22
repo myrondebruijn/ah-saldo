@@ -4,8 +4,9 @@ import {
   validCode, validNumber,
 } from './logic.js';
 import {
-  AH, START_CATS, US, addFile, addStarter, balanceOn, byParty, cardsOn, decodeText, emptyBank, figures, fixedCosts, fixedSuggestions,
-  forWhom, giftGuesses, giftsBought, giftsToFill, hasGap, inCategory, monthOf, parseBank, readCsv, readOpenbank, ruleKey, shiftMonth, sorter,
+  AH, START_CATS, US, addBalance, addFile, addStarter, balanceOn, byParty, cardsOn, catchUp, decodeText, dueOn, emptyBank, figures, fixedCosts,
+  fixedSuggestions, forWhom, giftGuesses, giftsBought, giftsToFill, hasGap, heldShops, inCategory, monthOf, parseBank, payFrom, readCsv,
+  readOpenbank, ruleKey, shiftMonth, sorter,
 } from './bank.js';
 
 const KEY = 'ah-saldo'; // the app's first name; changing this key would hide everything already saved
@@ -120,6 +121,9 @@ const catById = (id) => bank.cats.find((cat) => cat.id === id);
 const catName = (id) => (catById(id) ? esc(shown(catById(id).name)) : L('Nog indelen', 'To sort'));
 const sortedCats = () => KIND_ORDER.flatMap((kind) => bank.cats.filter((cat) => cat.kind === kind));
 const accountById = (id) => bank.accounts.find((account) => account.id === id);
+// a shop's balance is an account too; it is named after the shop, in the language of the app
+const nameOf = (account) => (account?.shop ? L(`${account.shop}-saldo`, `${account.shop} balance`) : account?.name ?? '');
+const balanceOf = (shop) => bank.accounts.find((account) => account.shop === shop);
 const monthFigures = (month) => figures(bank, state.purchases, ...monthRange(month));
 const cardTotal = () => state.cards.reduce((sum, card) => sum + Math.max(balance(card), 0), 0);
 
@@ -309,14 +313,15 @@ const meterBar = (share, { over = false, pace = null, rank = false } = {}) => `
 function txRow(tx, catOf, { category = true, account = true, toFill } = {}) {
   const cat = catOf(tx);
   const others = cat === 'boodschappen' ? (tx.shares ?? []).filter((share) => share.who !== US).map((share) => esc(shown(share.who))) : [];
-  const gift = tx.gift ? `${esc(tx.gift.shop)} ${formatEuro(tx.gift.value)}${cat === 'cadeaukaarten' && tx.gift.shop === AH ? ` · ${L('op de kaart', 'on the card')}` : ''}`
+  const gift = tx.gift ? `${esc(tx.gift.shop)} ${formatEuro(tx.gift.value)}${cat !== 'cadeaukaarten' || !heldShops(bank).has(tx.gift.shop) ? ''
+    : ` · ${tx.gift.shop === AH ? L('op de kaart', 'on the card') : L('op het saldo', 'on the balance')}`}`
     : toFill?.has(tx.id) ? `<span class="todo">${L('winkel invullen', 'fill in the shop')}</span>` : '';
   return `
     <li><button class="row tx" data-action="tx" data-id="${esc(tx.id)}">
       <span class="row-main">${esc(tx.name)} <small>${dayShort(tx.date)}${
         category ? ` · <span${cat ? '' : ' class="todo"'}>${catName(cat)}</span>` : ''}${
         others.length ? ` · ${L('ook voor', 'also for')} ${others.join(', ')}` : ''}${gift ? ` · ${gift}` : ''}${
-        account ? ` · ${esc(accountById(tx.acc)?.name ?? '')}` : ''}</small></span>
+        account ? ` · ${esc(nameOf(accountById(tx.acc)))}` : ''}</small></span>
       <span class="amount${tx.cents > 0 ? ' plus' : ''}">${signed(tx.cents)}</span>
     </button></li>`;
 }
@@ -369,12 +374,16 @@ function giftSections(from, to) {
     <li class="row"><span class="row-main">${label} <small>${giftText(sum)}</small></span><span class="amount">${formatEuro(sum.value - sum.paid)}</span></li>`;
   const shopRow = (shop) => {
     const percent = ((shop.value - shop.paid) / shop.value * 100).toLocaleString(LOCALE, { maximumFractionDigits: 1 });
+    const saved = `${formatEuro(shop.value - shop.paid)} ${L('bespaard', 'saved')}`;
+    const account = balanceOf(shop.shop);
+    const left = shop.shop === AH ? `${L('nu', 'now')} ${formatEuro(cardTotal())} ${L('op de kaarten', 'on the cards')}`
+      : account ? `${L('nu', 'now')} ${formatEuro(balanceOn(bank, account))} ${L('saldo', 'balance')}` : '';
     const inside = `
-      <span class="row-main">${esc(shop.shop)} <small class="under">${shop.shop === AH
-        ? `${L('nu', 'now')} ${formatEuro(cardTotal())} ${L('op de kaarten', 'on the cards')} · ${formatEuro(shop.value - shop.paid)} ${L('bespaard', 'saved')}`
-        : `${formatEuro(shop.value - shop.paid)} ${L('bespaard', 'saved')} · ${percent}%`}</small></span>
+      <span class="row-main">${esc(shop.shop)} <small class="under">${left ? `${left} · ${saved}` : `${saved} · ${percent}%`}</small></span>
       <span>${formatEuro(shop.value)}</span>${meterBar(shop.value / whole, { rank: true })}`;
-    return shop.shop === AH ? `<li><a class="row meter-row" href="#/kaarten">${inside}</a></li>` : `<li class="row meter-row">${inside}</li>`;
+    return shop.shop === AH ? `<li><a class="row meter-row" href="#/kaarten">${inside}</a></li>`
+      : account ? `<li><a class="row meter-row" href="#/saldo/${account.id}">${inside}</a></li>`
+      : `<li><button class="row meter-row" data-action="startBalance" data-id="${esc(shop.shop)}">${inside}</button></li>`;
   };
   return `
     <h2 class="section">${L('Bespaard', 'Saved')}</h2>
@@ -383,7 +392,52 @@ function giftSections(from, to) {
       ${saved(sinceText(), giftSum(all))}
     </ul>
     <h2 class="section">${L('Gekocht per winkel', 'Bought per shop')} · ${sinceText()}</h2>
-    <ul class="group">${all.map(shopRow).join('')}</ul>`;
+    <ul class="group">${all.map(shopRow).join('')}</ul>
+    <p class="group-note">${L('Heb je bij een winkel nog saldo staan? Tik op de winkel om het bij te houden. Een kaart voor die winkel is dan saldo, en wat je eruit betaalt is de uitgave.',
+      'Do you still have a balance at a shop? Tap the shop to keep it. A card for that shop is then balance, and what you pay from it is the spending.')}</p>`;
+}
+
+// A shop's balance: what is left, what it pays every month, and everything that moved it. A gift card bought
+// for the shop adds what the card is worth; a tap on a line opens the transaction behind it.
+function balanceScreen(account) {
+  if (!account?.shop) return overviewScreen();
+  const catOf = sorter(bank);
+  const moves = [
+    ...bank.txs.filter((tx) => tx.acc === account.id).map((tx) => ({
+      tx, cents: tx.cents, name: esc(tx.name), detail: `<span${catOf(tx) ? '' : ' class="todo"'}>${catName(catOf(tx))}</span>` })),
+    ...bank.txs.filter((tx) => tx.gift?.shop === account.shop).map((tx) => ({
+      tx, cents: tx.gift.value, name: L('Cadeaukaart', 'Gift card'), detail: `${formatEuro(-tx.cents)} ${L('betaald', 'paid')}` })),
+  ].sort((a, b) => b.tx.date.localeCompare(a.tx.date));
+  return {
+    html: `
+      <header class="navbar">${backButton()}<h1>${esc(nameOf(account))}</h1><span></span></header>
+      <section class="summary">
+        <p class="footnote">${L('Saldo nu', 'Balance now')}</p>
+        <p class="total">${formatEuro(balanceOn(bank, account))}</p>
+        <p class="footnote">${L('Ingevuld op', 'Entered on')} ${dayShort(account.through)}</p>
+      </section>
+      <div class="group">
+        <button class="row tint" data-action="addPayment" data-id="${account.id}">${L('Betaling toevoegen', 'Add a payment')}</button>
+        <button class="row tint" data-action="correctBalance" data-id="${account.id}">${L('Saldo corrigeren', 'Correct balance')}</button>
+      </div>
+      ${account.monthly.length ? `
+        <h2 class="section">${L('Elke maand', 'Every month')}</h2>
+        <ul class="group">${account.monthly.map((each, index) => `
+          <li class="row"><span class="row-main">${esc(each.name)} <small>${formatEuro(-each.cents)} · ${L('weer op', 'next on')} ${dayShort(dueOn(each))}</small></span>
+            <button class="text-button" data-action="stopMonthly" data-id="${account.id}" data-index="${index}">${L('Stoppen', 'Stop')}</button></li>`).join('')}</ul>` : ''}
+      <h2 class="section">${L('Geschiedenis', 'History')}</h2>
+      ${moves.length ? `<ul class="group">${moves.slice(0, view.rows).map((move) => `
+        <li><button class="row tx" data-action="tx" data-id="${esc(move.tx.id)}">
+          <span class="row-main">${move.name} <small>${dayShort(move.tx.date)} · ${move.detail}</small></span>
+          <span class="amount${move.cents > 0 ? ' plus' : ''}">${signed(move.cents)}</span>
+        </button></li>`).join('')}</ul>
+        ${moves.length > view.rows ? `<div class="group"><button class="row tint" data-action="moreRows">${L('Toon meer', 'Show more')}</button></div>` : ''}` : ''}
+      <p class="group-note">${L(`Het saldo is ingevuld op ${dayShort(account.through)}. Betalingen en cadeaukaarten van daarna gaan eraf of komen erbij; wat eerder was, zat er al in.`,
+        `The balance was entered on ${dayShort(account.through)}. Payments and gift cards after that day lower or raise it; what came earlier was in it already.`)}</p>
+      <div class="group">
+        <button class="row danger" data-action="removeBalance" data-id="${account.id}">${L('Saldo niet meer bijhouden', 'Stop keeping this balance')}</button>
+      </div>`,
+  };
 }
 
 const pots = () => bank.cats.filter((cat) => cat.kind === 'out' && cat.budget);
@@ -397,11 +451,14 @@ function fixedSummary(month) {
 }
 
 function accountRows(date) {
-  return bank.accounts.map((account) => `
+  return bank.accounts.map((account) => (account.shop ? `
+    <li><a class="row" href="#/saldo/${account.id}">
+      <span class="row-main">${esc(nameOf(account))} <small>${L('Saldo bij de winkel', 'Balance at the shop')}</small></span>
+      <span class="amount">${formatEuro(balanceOn(bank, account, date))}</span>${icon('next')}</a></li>` : `
     <li><button class="row" data-action="renameAccount" data-id="${esc(account.id)}">
       <span class="row-main">${esc(account.name)} <small>${L('t/m', 'up to')} ${dayShort(account.through)} · ${L('geüpload', 'uploaded')} ${dayShort(isoDate(new Date(account.uploaded)))}</small></span>
       <span class="amount">${formatEuro(balanceOn(bank, account, date))}</span>
-    </button></li>`).join('');
+    </button></li>`)).join('');
 }
 
 const worthOn = (date) => bank.accounts.reduce((sum, account) => sum + balanceOn(bank, account, date), 0) + cardsOn(state.cards, date);
@@ -412,7 +469,7 @@ function overviewScreen() {
   const month = thisMonth();
   const now = monthFigures(month);
   const today = isoDate();
-  const oldest = Math.max(0, ...bank.accounts.map((account) => daysLeft(today, isoDate(new Date(account.uploaded)))));
+  const oldest = Math.max(0, ...bank.accounts.filter((account) => !account.shop).map((account) => daysLeft(today, isoDate(new Date(account.uploaded)))));
   const fixed = fixedSummary(month);
   const suggested = fixedSuggestions(bank, month).length;
   const open = openCount();
@@ -595,8 +652,8 @@ function categoryScreen(id) {
         ${txs.length > shownRows.length ? `<div class="group"><button class="row tint" data-action="moreRows">${L('Toon meer', 'Show more')}</button></div>` : ''}
         ${cat?.id === 'boodschappen' ? `<p class="group-note">${L('Was iets, of een deel ervan, voor iemand anders? Tik op de transactie en kies Voor wie.',
           'Was something, or part of it, for someone else? Tap the transaction and choose For whom.')}</p>` : ''}
-        ${gifts ? `<p class="group-note">${L(`Een kaart van ${AH} telt hier niet mee: het geld staat op de kaart en telt als boodschappen zodra je ermee betaalt.`,
-          `A card for ${AH} does not count here: the money is on the card and counts as groceries once you pay with it.`)}</p>` : ''}`
+        ${gifts ? `<p class="group-note">${L(`Een kaart van ${AH}, of van een winkel waarvan je het saldo bijhoudt, telt hier niet mee: het geld telt als uitgave zodra je ermee betaalt.`,
+          `A card for ${AH}, or for a shop whose balance you keep, does not count here: the money counts as spending once you pay with it.`)}</p>` : ''}`
       : blank(cat ? L('Niets in deze maand', 'Nothing this month') : L('Alles is ingedeeld', 'Everything is sorted'))}`,
   };
 }
@@ -742,7 +799,7 @@ function insightScreen() {
           ${lineChart(points, worthMonth, 'pickWorth')}
         </section>
         <ul class="group">
-          ${bank.accounts.map((account) => `<li class="row"><span class="row-main">${esc(account.name)}</span>
+          ${bank.accounts.map((account) => `<li class="row"><span class="row-main">${esc(nameOf(account))}</span>
             <span class="amount">${formatEuro(balanceOn(bank, account, worthMonth === thisMonth() ? '9999' : `${worthMonth}-31`))}</span></li>`).join('')}
           <li class="row"><span class="row-main">${L('Cadeaukaarten', 'Gift cards')}</span>
             <span class="amount">${formatEuro(cardsOn(state.cards, worthMonth === thisMonth() ? '9999' : `${worthMonth}-31`))}</span></li>
@@ -790,7 +847,7 @@ function transactionsScreen() {
           ${sortedCats().map((cat) => option(cat.id, esc(shown(cat.name)), view.cat)).join('')}</select>${icon('updown')}</label>
         <label><select data-filter="acc" aria-label="${L('Rekening', 'Account')}">
           ${option('all', L('Alle rekeningen', 'All accounts'), view.acc)}
-          ${bank.accounts.map((account) => option(account.id, esc(account.name), view.acc)).join('')}</select>${icon('updown')}</label>
+          ${bank.accounts.map((account) => option(account.id, esc(nameOf(account)), view.acc)).join('')}</select>${icon('updown')}</label>
       </div>
       <div id="txList">${txList()}</div>`,
   };
@@ -1126,9 +1183,10 @@ const SCREENS = {
   potjes: potsScreen, kaarten: cardsScreen, kaart: cardsScreen, betalen: cardsScreen, archief: archiveScreen, uitgaven: statsScreen, uitgave: statsScreen,
   inzicht: insightScreen, transacties: transactionsScreen, meer: settingsScreen, categorieen: categoriesScreen, vast: fixedScreen,
   categorie: () => categoryScreen(routeId()),
+  saldo: () => balanceScreen(accountById(routeId())),
 };
 // how deep the current address sits, which decides whether a change slides forward or back; the tabs are 0
-const DEPTH = { meer: 1, vast: 1, categorie: 1, archief: 1, uitgaven: 1, kaart: 1, categorieen: 2, uitgave: 2, betalen: 3 };
+const DEPTH = { meer: 1, vast: 1, categorie: 1, archief: 1, uitgaven: 1, kaart: 1, categorieen: 2, uitgave: 2, saldo: 2, betalen: 3 };
 const depth = () => DEPTH[route()] ?? 0;
 let shownDepth = 0;
 let tapped = false; // true when a tap inside the app caused the navigation
@@ -1369,7 +1427,7 @@ async function askTx(tx) {
   const key = ruleKey(tx.name); // empty for a name without letters: then there is nothing to hang a rule on
   const before = sorter(bank)(tx);
   $('txFacts').innerHTML = `
-    <p class="row"><span class="row-main">${esc(tx.name)} <small>${formatDate(tx.date, 'UTC')} · ${esc(accountById(tx.acc)?.name ?? '')}</small></span>
+    <p class="row"><span class="row-main">${esc(tx.name)} <small>${formatDate(tx.date, 'UTC')} · ${esc(nameOf(accountById(tx.acc)))}</small></span>
       <span class="amount${tx.cents > 0 ? ' plus' : ''}">${signed(tx.cents)}</span></p>
     ${tx.text ? `<p class="row"><small class="row-main selectable">${esc(tx.text)}</small></p>` : ''}`;
   const choice = (id, name) => `
@@ -1407,7 +1465,13 @@ async function askTx(tx) {
   };
   showWho();
   showGift();
-  if (await openDialog($('txDialog')) !== 'ok') return;
+  $('txDeleteGroup').hidden = !accountById(tx.acc)?.shop; // only what was entered by hand can be taken out again
+  const answer = await openDialog($('txDialog'));
+  if (answer === 'delete' && await ask(L(`${signed(tx.cents)} voor ${tx.name} verwijderen?`, `Delete ${signed(tx.cents)} for ${tx.name}?`), L('Verwijderen', 'Delete'))) {
+    bank.txs = bank.txs.filter((each) => each !== tx);
+    saveBank();
+  }
+  if (answer !== 'ok') return;
   const cat = form.elements.cat.value;
   if (keepsGift() && gift) tx.gift = gift;
   else delete tx.gift;
@@ -1423,6 +1487,29 @@ async function askTx(tx) {
   else delete tx.cat;
   if (!$('txFixedRow').hidden && fixed.checked !== (bank.fixed[key] === true)) bank.fixed[key] = fixed.checked;
   saveBank();
+}
+
+// Asks for a payment from a shop's balance: once, or every month from its date on. A name the app has not
+// seen is sorted at once, so every later payment of that name follows.
+async function askPayment(account) {
+  const form = $('payDialog').querySelector('form');
+  form.reset();
+  form.elements.date.value = isoDate();
+  $('payNote').textContent = L(`Uit het saldo bij ${account.shop}`, `From the balance at ${account.shop}`);
+  let pay;
+  const answer = await openDialog($('payDialog'), () => {
+    const { name, amount, date, monthly } = form.elements;
+    pay = { name: name.value.trim(), cents: parseEuro(amount.value), date: date.value, monthly: monthly.checked };
+    if (!isName(pay.name)) return L('Vul in waarvoor het was.', 'Enter what it was for.');
+    if (!pay.cents) return ENTER_AMOUNT;
+    if (!isDate(pay.date)) return ENTER_DATE;
+    return !pay.monthly && pay.date > isoDate() ? L('Kies vandaag of een eerdere dag.', 'Choose today or an earlier day.') : '';
+  });
+  if (answer !== 'ok') return;
+  if (pay.monthly) account.monthly.push({ name: pay.name, cents: -pay.cents, day: Number(pay.date.slice(8)), next: monthOf(pay.date) });
+  const [first] = pay.monthly ? catchUp(bank, isoDate()) : [payFrom(bank, account, pay.date, -pay.cents, pay.name)];
+  saveBank();
+  if (first && !sorter(bank)(first)) await askTx(first);
 }
 
 // Adds a category, or edits `cat` when given. An amount per month makes a spending category a pot.
@@ -1534,6 +1621,7 @@ async function importBankFiles() {
     }
   }
   if (changed) {
+    catchUp(bank, isoDate());
     state.needsBackup = true;
     localStorage.setItem(KEY, JSON.stringify(state));
     saveBank();
@@ -1711,6 +1799,47 @@ const actions = {
       saveBank();
     }
   },
+  // a shop's balance
+  async startBalance(card, button) {
+    const shop = button.dataset.id;
+    const cents = await askAmount(L(`Saldo bij ${shop}`, `Balance at ${shop}`), L('Saldo nu', 'Balance now'));
+    if (cents === null) return;
+    const account = addBalance(bank, { shop, balance: cents, through: isoDate() }, new Date().toISOString());
+    saveBank();
+    if (account) go(`#/saldo/${account.id}`);
+  },
+  addPayment: (card, button) => askPayment(accountById(button.dataset.id)),
+  deleteTx: (card, button) => closeDialog(button.closest('dialog'), 'delete'),
+  async correctBalance(card, button) {
+    const account = accountById(button.dataset.id);
+    const before = balanceOn(bank, account);
+    const now = await askAmount(L('Saldo corrigeren', 'Correct balance'), L('Saldo nu', 'Balance now'));
+    if (now === null || now === before) return;
+    // the difference is booked as a payment of today (or as money back), so nothing that was spent goes missing
+    payFrom(bank, account, isoDate(), now - before, account.shop);
+    Object.assign(account, { balance: now, through: isoDate() });
+    saveBank();
+  },
+  async stopMonthly(card, button) {
+    const account = accountById(button.dataset.id);
+    const each = account.monthly[Number(button.dataset.index)];
+    const sure = await ask(L(`${each.name} niet meer elke maand boeken? Wat al geboekt is, blijft staan.`,
+      `Stop booking ${each.name} every month? What was booked already stays.`), L('Stoppen', 'Stop'));
+    if (!sure) return;
+    account.monthly = account.monthly.filter((other) => other !== each);
+    saveBank();
+  },
+  async removeBalance(card, button) {
+    const account = accountById(button.dataset.id);
+    const sure = await ask(L(`Het saldo bij ${account.shop} niet meer bijhouden? De betalingen uit dit saldo verdwijnen, en een kaart voor deze winkel telt weer als uitgave op de dag van aankoop.`,
+      `Stop keeping the balance at ${account.shop}? The payments from this balance are removed, and a card for this shop counts as spending again on the day it is bought.`),
+    L('Niet meer bijhouden', 'Stop keeping it'));
+    if (!sure) return;
+    bank.accounts = bank.accounts.filter((other) => other !== account);
+    bank.txs = bank.txs.filter((tx) => tx.acc !== account.id);
+    saveBank();
+    actions.back();
+  },
   fixedYes(card, button) { bank.fixed[button.dataset.id] = true; saveBank(); },
   fixedNo(card, button) { bank.fixed[button.dataset.id] = false; saveBank(); },
   // which month (or year) the pots, a category, the fixed costs and the insight screen show
@@ -1881,4 +2010,8 @@ navigator.storage?.persist?.(); // ask the browser not to evict the cards
 navigator.serviceWorker?.register('sw.js');
 state = load();
 bank = loadBank();
-render();
+if (catchUp(bank, isoDate()).length) saveBank();
+else render();
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && catchUp(bank, isoDate()).length) saveBank();
+});

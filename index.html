@@ -166,6 +166,36 @@
       </div>
       <div class="group" id="txCats"></div>
       <p class="error" role="alert"></p>
+      <div class="group" id="txDeleteGroup">
+        <button type="button" class="row danger" data-action="deleteTx" data-en="Delete this payment">Deze betaling verwijderen</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="payDialog" class="sheet" aria-labelledby="payTitle">
+    <form method="dialog" novalidate>
+      <header class="sheet-bar">
+        <button type="button" class="text-button" data-action="close" data-en="Cancel">Annuleren</button>
+        <h2 id="payTitle" data-en="Payment">Betaling</h2>
+        <button class="text-button strong" value="ok" data-en="Save">Opslaan</button>
+      </header>
+      <p class="group-note" id="payNote"></p>
+      <div class="group">
+        <label class="field"><span data-en="What for">Waarvoor</span>
+          <input name="name" maxlength="30" autocomplete="off">
+        </label>
+        <label class="field"><span data-en="Amount">Bedrag</span>
+          <input name="amount" inputmode="decimal" autocomplete="off" placeholder="0,00" data-en="0.00">
+        </label>
+        <label class="field"><span data-en="Date">Datum</span>
+          <input name="date" type="date">
+        </label>
+      </div>
+      <div class="group">
+        <label class="row"><span class="row-main" data-en="Every month from that date">Elke maand vanaf die datum</span>
+          <input type="checkbox" name="monthly" class="switch" role="switch"></label>
+      </div>
+      <p class="error" role="alert"></p>
     </form>
   </dialog>
 
