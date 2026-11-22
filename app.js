@@ -23,6 +23,8 @@ const SHOPS = ['AH', 'Plus', 'Jumbo', 'Dirk', 'Lidl', 'Anders'];
 // the default names are saved in Dutch, so a language switch leaves the data alone
 const ENGLISH_NAMES = new Map([
   [US, 'Us'], ['Anders', 'Other'], ['Boodschappen', 'Groceries'], ['Auto', 'Car'], ['Verzekering & bank', 'Insurance & bank'],
+  ['Abonnementen', 'Subscriptions'], ['Verzekering & zorg', 'Insurance & health'], ['Winkelen', 'Shopping'],
+  ['Werk & bedrijf', 'Work & business'], ['Aflossing lening', 'Loan repayment'],
   ['Reizen', 'Travel'], ['Voor anderen', 'For others'], ['Overig', 'Other'], ['Salaris', 'Salary'], ['Overig inkomen', 'Other income'],
   ['Overboeking', 'Transfer'], ['Cadeaukaarten', 'Gift cards'],
 ]);

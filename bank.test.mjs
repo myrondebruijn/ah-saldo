@@ -182,7 +182,12 @@ test('a transaction is sorted by its own choice, then the rule, then what the ap
   assert.equal(bank.sorter(data)(data.txs[2]), '');
   assert.equal(catOf(tx({ name: 'Plus via Tikkie' })), '');
   assert.equal(catOf(tx({ name: 'BCK*Jumbo Dorp' })), 'boodschappen');
-  assert.equal(catOf(tx({ name: 'Disney Plus' })), '');
+  assert.equal(catOf(tx({ name: 'Plus Abonnement Service' })), 'boodschappen'); // the chain's name leads: a rule of the user's can correct it
+  assert.equal(catOf(tx({ name: 'Spotify AB' })), 'abonnementen');
+  assert.equal(catOf(tx({ name: 'help.hbomax.com Stockholm SWE' })), 'abonnementen');
+  assert.equal(catOf(tx({ name: 'KPN B.V.' })), 'abonnementen');
+  assert.equal(catOf(tx({ name: 'Disney Plus' })), 'abonnementen');
+  assert.equal(catOf(tx({ name: 'Canal Plus' })), '');
 });
 
 test('figures: income, spending, money back, neutral money and what is not sorted yet', () => {

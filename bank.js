@@ -11,8 +11,10 @@ export const US = 'Wij'; // the household itself, in "Voor wie?"
 export const START_CATS = [
   { id: 'boodschappen', name: 'Boodschappen', kind: 'out' },
   { id: 'fun', name: 'Fun money', kind: 'out' },
+  { id: 'abonnementen', name: 'Abonnementen', kind: 'out' },
   { id: 'auto', name: 'Auto', kind: 'out' },
-  { id: 'verzekering', name: 'Verzekering & bank', kind: 'out' },
+  { id: 'verzekering', name: 'Verzekering & zorg', kind: 'out' },
+  { id: 'winkelen', name: 'Winkelen', kind: 'out' },
   { id: 'reizen', name: 'Reizen', kind: 'out' },
   { id: 'anderen', name: 'Voor anderen', kind: 'out' },
   { id: 'overig', name: 'Overig', kind: 'out' },
@@ -232,9 +234,11 @@ export function hasGap(bank, account) {
 // What a rule remembers of a counterparty's name: lower case, without numbers (a shop's branch) and marks.
 export const ruleKey = (name) => name.toLowerCase().replace(/[^a-zà-ÿ]+/g, ' ').trim();
 
-// Counterparties sorted without a rule of the user's: the supermarket chains, and the shop the gift cards come from.
+// Counterparties sorted without a rule of the user's: the supermarket chains, the subscriptions every household
+// knows (streaming, phone and internet), and the shop the gift cards come from.
 const KNOWN = [
   [/^((bck|ccv|sumup|zettle) )?(albert heijn|ah|jumbo|lidl|aldi|plus|dirk vdbroek|dirk van den broek|hoogvliet|coop|spar|picnic|vomar|dekamarkt|nettorama|sligro)( |$)/, 'boodschappen'],
+  [/^(spotify|netflix|disney plus|hbo max|help hbomax|videoland|amazon prime|youtube premium|apple com bill|openai|odido|youfone|kpn|vodafone|ziggo|simyo|lebara)( |$)/, 'abonnementen'],
   [/^wissel (nederland|nl)( |$)/, 'cadeaukaarten'],
 ];
 // a payment request from a person named like a shop ("Plus via Tikkie") is nobody's groceries
