@@ -395,6 +395,7 @@ async function backFromRabo(params) {
 // asks permission only straight from a tap, so the server's key is fetched ahead.
 
 const PUSH_KEY = `${KEY}-push`; // this phone's id at the server while notifications are on
+const PUSH_LATER = `${KEY}-push-later`; // "Niet nu" on the question on Overview; the switch in Settings stays
 let pushKey = '';
 
 async function sendSubscription(subscription) {
@@ -431,7 +432,10 @@ async function startPush() {
   if (!sharing || !('PushManager' in window)) return;
   try {
     pushKey = (await api('GET', '/push', { token: await tokenOf(household) })).key;
-    if (!localStorage.getItem(PUSH_KEY)) return;
+    if (!localStorage.getItem(PUSH_KEY)) {
+      if (!busy()) render(); // Overview can ask now
+      return;
+    }
     const subscription = await (await navigator.serviceWorker.ready).pushManager.getSubscription();
     if (subscription) await sendSubscription(subscription);
     else localStorage.removeItem(PUSH_KEY); // turned off in the iPhone settings
@@ -559,6 +563,15 @@ const paidWith = (cards, total) => `
 // ---------- cards, card, archive ----------
 
 // while sharing, every change is on the server a moment after it is saved
+// Overview asks once per phone. The answer must be a tap of its own: only straight from one does iOS ask for permission.
+const pushNotice = () => (pushKey && standalone && Notification.permission !== 'denied' && !localStorage.getItem(PUSH_KEY) && !localStorage.getItem(PUSH_LATER) ? `
+  <div class="group">
+    <p class="row"><span class="row-main">${L('Meldingen aanzetten? Dan hoor je het bij nieuwe Rabo-transacties, als een maand is afgesloten en als er nog bestanden ontbreken.',
+      'Turn on notifications? You then hear about new Rabo transactions, a closed month and files that are still missing.')}</span></p>
+    <button class="row tint" data-action="pushOn">${L('Meldingen aanzetten', 'Turn notifications on')}</button>
+    <button class="row tint" data-action="pushLater">${L('Niet nu', 'Not now')}</button>
+  </div>` : '');
+
 const backupNotice = () => (state.needsBackup && !sharing ? `
   <div class="group">
     <p class="row notice">${icon('warn')}<span class="row-main">${L('Er zijn nieuwe gegevens zonder back&#8209;up.', 'There is new data without a backup.')}</span></p>
@@ -883,6 +896,7 @@ function overviewScreen() {
       ${gaps.length ? `
         <div class="group"><p class="row notice">${icon('warn')}<span class="row-main">${L('Er ontbreken transacties bij', 'Transactions are missing for')}
           ${gaps.map((account) => esc(account.name)).join(', ')}. ${L('Upload ook de periode ertussen.', 'Upload the period in between as well.')}</span></p></div>` : ''}
+      ${pushNotice()}
       ${backupNotice()}
       <h2 class="section">${L('Potjes', 'Pots')}</h2>
       <ul class="group">
@@ -2214,6 +2228,10 @@ const actions = {
   fetchRabo: () => fetchRabo(true),
   pushOn,
   pushOff,
+  pushLater() {
+    localStorage.setItem(PUSH_LATER, '1');
+    render();
+  },
   async syncNow() {
     await sync();
     render();
