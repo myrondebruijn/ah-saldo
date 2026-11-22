@@ -292,12 +292,15 @@ function cardParts(purchase) {
 // income, spending, how many transactions are not sorted yet, and `byCat`: category id -> cents
 // (spent for a spending category, received for an income one; '' holds what is not sorted yet).
 // Money back in a spending category lowers what was spent there. Unsorted money counts by its sign.
+// `moved`: category id -> cents, for money that only moved: it is not spending, but what went to a place the
+// app does not hold (a loan, an account that is not uploaded) did leave the accounts.
 export function figures(bank, purchases, from, to) {
   const catOf = sorter(bank);
   const kinds = new Map(bank.cats.map((cat) => [cat.id, cat.kind]));
   const start = from > bank.since ? from : bank.since;
   const byCat = new Map();
-  const result = { income: 0, spending: 0, open: 0, byCat };
+  const moved = new Map();
+  const result = { income: 0, spending: 0, open: 0, byCat, moved };
   const add = (cat, cents) => byCat.set(cat, (byCat.get(cat) ?? 0) + cents);
   for (const tx of bank.txs) {
     if (tx.date < start || tx.date >= to) continue;
@@ -311,6 +314,7 @@ export function figures(bank, purchases, from, to) {
       if (others) add('anderen', others);
     }
     if (kind === 'in') { result.income += tx.cents; add(cat, tx.cents); }
+    if (kind === 'none') moved.set(cat, (moved.get(cat) ?? 0) + tx.cents);
   }
   for (const purchase of purchases) {
     const date = isoDate(new Date(purchase.at));

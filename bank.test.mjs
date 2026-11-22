@@ -205,6 +205,8 @@ test('figures: income, spending, money back, neutral money and what is not sorte
   assert.equal(all.spending, 2500 + 4510 + 10000 + 4700 - 2000); // J. Jansen is not sorted yet and counts as spending
   assert.equal(all.open, 1);
   assert.deepEqual([...all.byCat].sort(), [['', 10000], ['boodschappen', 4510], ['cadeaukaarten', 4700], ['fun', 500], ['salaris', 300000]]);
+  assert.deepEqual([...all.moved], [['overboeking', -20000]]); // the credit card's bill: not spending, but it left this account
+  assert.equal(all.income - all.spending + all.moved.get('overboeking'), data.txs.reduce((sum, each) => sum + each.cents, 0)); // so the three add up to what the account lost or gained
   const june = bank.figures(data, [], '2026-06-01', '2026-07-01');
   assert.equal(june.byCat.get('fun'), 2500);
   data.since = '2026-06-27';
@@ -239,6 +241,7 @@ test('gift cards: a card for another shop is spending, an AH card is balance, an
   data.txs.at(-1).cat = 'boodschappen'; // an AH card from before the app paid at the till: groceries on the day it was bought
   const sum = bank.figures(data, [], '2026-06-01', '2026-08-01');
   assert.equal(sum.byCat.get('cadeaukaarten'), 4700 + 9400 + 9800 - 9800 + 9800); // the AH card of 44,33 is not in it
+  assert.deepEqual([...sum.moved], [['cadeaukaarten', -4433]]); // it moved onto the card
   assert.equal(sum.byCat.get('boodschappen'), 3940);
   assert.equal(sum.spending, 4700 + 9400 + 9800 + 3940);
   assert.deepEqual(bank.giftsBought(data, '2026-07-01', '2026-08-01'), [

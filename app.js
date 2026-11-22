@@ -662,6 +662,14 @@ function insightScreen() {
   const spent = [...now.byCat].filter(([id, cents]) => (kinds.get(id) ?? (cents > 0 ? 'out' : '')) === 'out' && cents > 0).sort((a, b) => b[1] - a[1]);
   const earned = [...now.byCat].filter(([id]) => kinds.get(id) === 'in').sort((a, b) => b[1] - a[1]);
   const before = [1, 2, 3].map((back) => monthFigures(shiftMonth(view.month, -back)).spending);
+  // From what was left to what the net worth did. Money that only moved is not spending, but a loan repaid or
+  // money sent to an account the app does not hold did leave the accounts; the rest is the gift cards (a card
+  // is worth more than it cost, and balance can be added or corrected by hand).
+  const dayBefore = (date) => new Date(Date.parse(date) - 864e5).toISOString().slice(0, 10);
+  const worthWas = worthOn(dayBefore(from > bank.since ? from : bank.since));
+  const worthIs = worthOn(dayBefore(to));
+  const moves = bank.cats.filter((cat) => cat.kind === 'none').map((cat) => [cat, now.moved.get(cat.id) ?? 0]).filter(([, cents]) => cents);
+  const cardGain = worthIs - worthWas - left - moves.reduce((sum, [, cents]) => sum + cents, 0);
   const versus = (label, detail, other) => (other ? `
     <li class="row"><span class="row-main">${label} <small>${detail}</small></span>
       <span class="amount">${formatEuro(Math.abs(now.spending - other))} ${now.spending > other ? L('meer', 'more') : L('minder', 'less')}</span></li>` : '');
@@ -694,6 +702,22 @@ function insightScreen() {
         ${versus(L('Uit, tegen de maand ervoor', 'Out, against the month before'), monthName(shiftMonth(view.month, -1)), before[0])}
         ${versus(L('Uit, tegen het gemiddelde', 'Out, against the average'), L('van de drie maanden ervoor', 'of the three months before'), before.every(Boolean) ? average(before) : 0)}
       </ul>`}
+      ${moves.length || cardGain ? `
+        <h2 class="section">${L('Over en vermogen', 'Left over and net worth')}</h2>
+        <ul class="group">
+          <li class="row"><span class="row-main">${left < 0 ? L('Tekort', 'Short') : L('Over', 'Left')}</span><span class="amount">${signed(left)}</span></li>
+          ${moves.map(([cat, cents]) => `
+            <li><a class="row" href="#/categorie/${cat.id}"><span class="row-main">${esc(shown(cat.name))}${cat.id === 'overboeking'
+              ? ` <small>${L('van of naar een rekening buiten de app', 'from or to an account outside the app')}</small>` : ''}</span>
+              <span class="amount">${signed(cents)}</span>${icon('next')}</a></li>`).join('')}
+          ${cardGain ? `<li class="row"><span class="row-main">${L('Cadeaukaarten', 'Gift cards')} <small>${L('korting en correcties van het saldo', 'discount and corrections of the balance')}</small></span>
+            <span class="amount">${signed(cardGain)}</span></li>` : ''}
+          <li class="row"><span class="row-main"><strong>${L('Vermogen', 'Net worth')}</strong>
+            <small>${L('van', 'from')} ${formatEuro(worthWas)} ${L('naar', 'to')} ${formatEuro(worthIs)}</small></span>
+            <strong class="amount">${signed(worthIs - worthWas)}</strong></li>
+        </ul>
+        <p class="group-note">${L('Geld dat je aflost of wegzet telt niet als uitgave, maar gaat wel van je rekeningen af. Daarom groeit je vermogen niet altijd met wat over is.',
+          'Money you repay or set aside does not count as spending, but it does leave your accounts. That is why your net worth does not always grow by what is left.')}</p>` : ''}
       ${spent.length ? `
         <h2 class="section">${L('Uitgaven per categorie', 'Spending per category')}</h2>
         <ul class="group">${spent.map(([id, cents]) => `
