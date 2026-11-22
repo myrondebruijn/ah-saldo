@@ -14,7 +14,8 @@ const BANK_KEY = `${KEY}-bank`; // apart from the cards, so nothing in the bank 
 const lang = localStorage.getItem(`${KEY}-lang`) === 'en' ? 'en' : 'nl';
 const L = (nl, en) => (lang === 'en' ? en : nl);
 const LOCALE = L('nl-NL', 'en-GB');
-const formatEuro = (cents) => euroIn(cents, LOCALE);
+// an amount below zero is written with a true minus sign in front, everywhere
+const formatEuro = (cents) => (cents < 0 ? `− ${euroIn(-cents, LOCALE)}` : euroIn(cents, LOCALE));
 // AH's official "Saldochecker AH cadeaukaart" link, as published on ah.nl
 const CHECKER = 'https://service2.loyaltyinabox.com/CardBalanceChecker/2/paymentapi.aspx?cmd=showbalance&username=1379001&lang=nl-NL';
 const KIND = { start: L('Beginsaldo', 'Starting balance'), pay: L('Betaling', 'Payment'), correct: L('Correctie', 'Correction') };
@@ -207,7 +208,7 @@ function cardsScreen() {
     html: `
       <header class="large-title">
         <h1>${L('Kaarten', 'Cards')}</h1>
-        <button class="round" data-action="add" aria-label="${L('Kaart toevoegen', 'Add card')}">${icon('plus')}</button>
+        <button class="round plain" data-action="add" aria-label="${L('Kaart toevoegen', 'Add card')}">${icon('plus')}</button>
       </header>
       <section class="summary">
         <p class="footnote">${L('Totaal saldo', 'Total balance')}</p>
@@ -280,19 +281,21 @@ function lineChart(points, chosen, action) {
   const dot = place.find((point) => point.id === chosen) ?? place.at(-1);
   return `
     <svg class="line" viewBox="0 0 300 100" role="group" aria-label="${L('Verloop per maand', 'Course per month')}">
-      ${place.length > 1 ? `<polygon class="area" points="${place[0].x},96 ${path} ${place.at(-1).x},96"/><polyline class="stroke" points="${path}"/>` : ''}
+      ${place.length > 1 ? `<polyline class="stroke" points="${path}"/>` : ''}
       <line class="rule" x1="${dot.x.toFixed(1)}" x2="${dot.x.toFixed(1)}" y1="6" y2="96"/>
       <circle class="dot" cx="${dot.x.toFixed(1)}" cy="${dot.y.toFixed(1)}" r="5"/>
       ${place.map((point) => `<rect class="hit" x="${(point.x - (step || 284) / 2).toFixed(1)}" y="0" width="${(step || 284).toFixed(1)}" height="100"
         role="button" tabindex="0" data-action="${action}" data-id="${point.id}" aria-pressed="${point === dot}"
         aria-label="${point.name}: ${formatEuro(point.cents)}"><title>${point.name}: ${formatEuro(point.cents)}</title></rect>`).join('')}
     </svg>
-    <p class="axis"><span>${place[0].name}</span><span>${place.length > 1 ? place.at(-1).name : ''}</span></p>`;
+    <p class="axis"><span>${place[0].name} · ${formatEuro(place[0].cents)}</span>
+      <span>${place.length > 1 ? `${place.at(-1).name} · ${formatEuro(place.at(-1).cents)}` : ''}</span></p>`;
 }
 
-// A bar for a share of something: `over` colours it, `pace` (0-1) marks where today is in the month.
-const meterBar = (share, { over = false, pace = null } = {}) => `
-  <svg class="meter${over ? ' over' : ''}" aria-hidden="true"><rect class="track" width="100%" height="100%" rx="4"/>
+// A bar for a share of something. A pot's bar is blue, red (`over`) once it is overspent, and has a tick (`pace`, 0-1)
+// where today is in the month; `rank` draws a grey bar, for lists that only compare amounts.
+const meterBar = (share, { over = false, pace = null, rank = false } = {}) => `
+  <svg class="meter${over ? ' over' : ''}${rank ? ' rank' : ''}" aria-hidden="true"><rect class="track" width="100%" height="100%" rx="4"/>
     <rect width="${(Math.max(0, Math.min(share, 1)) * 100).toFixed(1)}%" height="100%" rx="4"/>
     ${pace === null ? '' : `<rect class="pace" x="${(pace * 100).toFixed(1)}%" width="2" height="100%"/>`}</svg>`;
 
@@ -317,7 +320,7 @@ function potRow(cat, spent, month) {
   const left = cat.budget - spent;
   return `
     <li><a class="row meter-row" href="#/categorie/${cat.id}">
-      <span class="row-main">${esc(shown(cat.name))} <small>${formatEuro(spent)} ${L('van', 'of')} ${formatEuro(cat.budget)}${running ? ` · ${L('dag', 'day')} ${day} ${L('van', 'of')} ${days}` : ''}</small></span>
+      <span class="row-main">${esc(shown(cat.name))} <small class="under">${formatEuro(spent)} ${L('van', 'of')} ${formatEuro(cat.budget)}</small></span>
       <span class="${left < 0 ? 'over-text' : ''}">${left < 0 ? L(`${formatEuro(-left)} erover`, `${formatEuro(-left)} over`) : L(`nog ${formatEuro(left)}`, `${formatEuro(left)} left`)}</span>
       ${meterBar(spent / cat.budget, { over: left < 0, pace: running ? day / days : null })}
     </a></li>`;
@@ -458,7 +461,8 @@ function potsScreen() {
   };
 }
 
-const backButton = () => `<button class="back" data-action="back">${icon('back')}${L('Terug', 'Back')}</button>`;
+// A category and the fixed costs are reached from several tabs: back names the one the owner came from.
+const backButton = () => `<button class="back" data-action="back">${icon('back')}${TABS.find(([id]) => id === tab)[3]}</button>`;
 
 // One category in one month: what it cost, the months before, who was paid, and every transaction.
 // The id 'open' stands for everything that still has to be sorted, of all months together.
@@ -472,7 +476,7 @@ function categoryScreen(id) {
   const fromCards = cat ? figures({ ...bank, txs: [] }, state.purchases, from, to).byCat.get(cat.id) ?? 0 : 0;
   const total = cat?.kind === 'none' ? txs.reduce((sum, tx) => sum + tx.cents, 0) : (monthFigures(view.month).byCat.get(cat?.id ?? '') ?? 0);
   const parties = byParty(txs);
-  const most = Math.max(1, ...parties.map((party) => Math.abs(party.cents)), fromCards);
+  const whole = Math.max(1, fromCards + parties.reduce((sum, party) => sum + Math.abs(party.cents), 0)); // the bars are shares of this
   const months = Array.from({ length: 6 }, (unused, index) => shiftMonth(view.month >= shiftMonth(thisMonth(), -5) ? thisMonth() : view.month, index - 5));
   const shownRows = txs.slice(0, view.rows);
   return {
@@ -497,12 +501,12 @@ function categoryScreen(id) {
         <h2 class="section">${cat ? L('Bij wie', 'Where') : L('Per naam, grootste eerst', 'Per name, largest first')}</h2>
         <ul class="group">
           ${fromCards ? `<li><a class="row meter-row" href="#/uitgaven"><span class="row-main">${L('AH met cadeaukaarten', 'AH with gift cards')}</span>
-            <span>${formatEuro(fromCards)}</span>${meterBar(fromCards / most)}</a></li>` : ''}
+            <span>${formatEuro(fromCards)}</span>${meterBar(fromCards / whole, { rank: true })}</a></li>` : ''}
           ${parties.slice(0, view.rows).map((party) => `
             <li><button class="row meter-row" data-action="sortParty" data-id="${esc(txs.find((tx) => ruleKey(tx.name) === party.key).id)}">
               <span class="row-main">${esc(party.name)}${party.count > 1 ? ` <small class="inline">${party.count}×</small>` : ''}</span>
               <span class="${cat ? '' : party.cents > 0 ? 'plus' : ''}">${cat && cat.kind !== 'none' ? formatEuro(sign * party.cents) : signed(party.cents)}</span>
-              ${meterBar(Math.abs(party.cents) / most)}
+              ${meterBar(Math.abs(party.cents) / whole, { rank: true })}
             </button></li>`).join('')}
         </ul>
         <h2 class="section">${L('Transacties', 'Transactions')}</h2>
@@ -568,6 +572,7 @@ function insightScreen() {
   const [from, to] = yearly ? [`${year}-01-01`, `${Number(year) + 1}-01-01`] : monthRange(view.month);
   const now = figures(bank, state.purchases, from, to);
   const left = now.income - now.spending;
+  const short = left < 0 && to <= isoDate(); // only a period that is over can end short
   const kinds = new Map(bank.cats.map((cat) => [cat.id, cat.kind]));
   const spent = [...now.byCat].filter(([id, cents]) => (kinds.get(id) ?? (cents > 0 ? 'out' : '')) === 'out' && cents > 0).sort((a, b) => b[1] - a[1]);
   const earned = [...now.byCat].filter(([id]) => kinds.get(id) === 'in').sort((a, b) => b[1] - a[1]);
@@ -595,7 +600,7 @@ function insightScreen() {
         <dl class="trio">
           <div><dt>${L('In', 'In')}</dt><dd>${formatEuro(now.income)}</dd></div>
           <div><dt>${L('Uit', 'Out')}</dt><dd>${formatEuro(now.spending)}</dd></div>
-          <div><dt>${left < 0 ? L('Tekort', 'Short') : L('Over', 'Left')}</dt><dd class="${left < 0 ? 'over-text' : ''}">${formatEuro(Math.abs(left))}</dd></div>
+          <div><dt>${left < 0 ? L('Tekort', 'Short') : L('Over', 'Left')}</dt><dd class="${short ? 'over-text' : ''}">${formatEuro(Math.abs(left))}</dd></div>
         </dl>
         ${now.income > 0 && left > 0 ? `<p class="footnote center">${Math.round(left / now.income * 100)}% ${L('van wat binnenkwam bleef over', 'of what came in was left')}</p>` : ''}
         ${flowChart(chartMonths(), yearly ? '' : view.month)}
@@ -610,7 +615,7 @@ function insightScreen() {
           <li><a class="row meter-row" href="#/categorie/${id || 'open'}">
             <span class="row-main${id ? '' : ' todo'}">${catName(id)}</span>
             <span>${formatEuro(cents)} <small class="inline">${Math.round(cents / now.spending * 100)}%</small></span>
-            ${meterBar(cents / spent[0][1])}
+            ${meterBar(cents / now.spending, { rank: true })}
           </a></li>`).join('')}</ul>` : ''}
       ${earned.length ? `
         <h2 class="section">${L('Inkomen', 'Income')}</h2>
@@ -924,8 +929,7 @@ const meters = (pairs, total) => pairs.map(([name, cents]) => `
   <li class="row meter-row">
     <span class="row-main">${esc(shown(name))}</span>
     <span>${formatEuro(cents)} <small>${Math.round(cents / total * 100)}%</small></span>
-    <svg class="meter" aria-hidden="true"><rect class="track" width="100%" height="100%" rx="4"/>
-      <rect width="${(cents / total * 100).toFixed(1)}%" height="100%" rx="4"/></svg>
+    ${meterBar(cents / total, { rank: true })}
   </li>`).join('');
 
 function statsScreen() {
@@ -1027,11 +1031,11 @@ const TABS = [
   ['transacties', '#/transacties', 'list', L('Transacties', 'Transactions')],
 ];
 const TAB_OF = {
-  '': 'overzicht', meer: 'overzicht', categorieen: 'overzicht', potjes: 'potjes', vast: 'potjes',
+  '': 'overzicht', meer: 'overzicht', categorieen: 'overzicht', potjes: 'potjes',
   kaarten: 'betalen', kaart: 'betalen', betalen: 'betalen', archief: 'betalen', uitgaven: 'betalen', uitgave: 'betalen',
   inzicht: 'inzicht', transacties: 'transacties',
 };
-let tab = 'overzicht'; // a category is reached from several tabs and keeps the one it came from
+let tab = 'overzicht'; // a category and the fixed costs are reached from several tabs and keep the one they came from
 
 const tabsHtml = () => TABS.map(([id, address, glyph, label]) => `
   <a class="tab${id === 'betalen' ? ' pay-tab' : ''}" href="${id === 'betalen' && useOrder().length ? '#/betalen' : address}"${id === tab ? ' aria-current="page"' : ''}>
@@ -1045,12 +1049,12 @@ function render() {
   else paying ??= { queue: useOrder(), steps: [] };
   const atTill = Boolean(card || paying?.queue.length); // the screens a till scanner reads stay white
   const install = needsInstall(navigator.userAgent, standalone);
+  tab = TAB_OF[route()] ?? tab;
   const screen = install ? installScreen()
     : card ? cardScreen(card)
     : atTill ? payScreen()
     : purchase ? purchaseScreen(purchase)
     : (SCREENS[route()] ?? overviewScreen)();
-  tab = TAB_OF[route()] ?? tab;
   document.body.classList.toggle('pay', atTill);
   app.innerHTML = screen.html;
   $('dock').innerHTML = screen.dock ?? '';

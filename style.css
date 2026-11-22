@@ -338,7 +338,7 @@ a.row:active, button.row:active { background: var(--fill); }
   backdrop-filter: saturate(180%) blur(20px);
 }
 body:has(#tabs:not([hidden])) main { padding-bottom: calc(6rem + env(safe-area-inset-bottom)); }
-.tab { display: grid; justify-items: center; gap: .125rem; min-height: 2.75rem; color: var(--label2); font-size: .6875rem; font-weight: 500; }
+.tab { display: grid; justify-items: center; gap: .125rem; min-height: 2.75rem; color: var(--label2); font-size: .6875rem; }
 .tab .icon { width: 1.5rem; height: 1.5rem; stroke-width: 1.8; }
 .tab[aria-current] { color: var(--link); }
 .pay-tab { color: var(--label); }
@@ -363,6 +363,10 @@ a.summary { display: block; }
 .selectable { -webkit-user-select: text; user-select: text; }
 .row input[type="date"] { width: auto; text-align: right; }
 .meter.over { fill: var(--red); }
+/* a list that only compares amounts: grey, so blue stays with the pots and the thing to do next */
+.meter.rank { fill: var(--quiet); }
+.meter.rank .track { fill: var(--fill); }
+.meter-row small.under { display: block; white-space: nowrap; }
 .meter .pace { fill: var(--label); }
 /* a pot inside the summary of its own category: no cell around it, the summary is the cell */
 .plain { margin-top: .75rem; }
@@ -374,8 +378,10 @@ a.summary { display: block; }
 
 /* money in beside money out: two colours for two series, so the legend below is part of the chart */
 .flow .column { font-size: .6875rem; }
-.flow .column svg { width: min(1.5rem, 100%); opacity: .45; }
-.flow .column[aria-pressed="true"] svg { opacity: 1; }
+.flow .column svg { width: min(1.5rem, 100%); }
+/* both colours stay at full strength in every month; the chosen month gets a band behind it */
+.flow .column { border-radius: .75rem; }
+.flow .column[aria-pressed="true"] { background: var(--fill); }
 .flow .in { fill: var(--series-in); }
 .flow .out { fill: var(--tint); }
 .legend { display: flex; justify-content: center; gap: 1.25rem; margin-top: .625rem; color: var(--label2); font-size: .8125rem; }
@@ -384,7 +390,6 @@ a.summary { display: block; }
 
 /* net worth: one line, the chosen month marked on it */
 .line { display: block; width: 100%; height: auto; margin-top: .75rem; overflow: visible; }
-.line .area { fill: var(--meter-track); }
 .line .stroke { fill: none; stroke: var(--tint); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .line .rule { stroke: var(--line); stroke-width: 1; }
 .line .dot { fill: var(--tint); stroke: var(--cell); stroke-width: 2; }
