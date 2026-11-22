@@ -595,6 +595,11 @@ export function fixedCosts(bank, month) {
   }).sort((a, b) => (b.expected || b.paid) - (a.expected || a.paid));
 }
 
+// What a running month will have cost at its end, in cents: what is spent, the fixed costs still to come, and the
+// rest at the pace of the days so far. A fixed cost paid already sets no pace: it comes once a month.
+export const forecast = ({ spent, fixedPaid, waiting, day, days }) =>
+  spent + waiting + Math.round(Math.max(0, spent - fixedPaid) / day * (days - day));
+
 // ---------- balances ----------
 
 // An account's balance at the end of `date`: the newest balance known, less everything booked after that day.

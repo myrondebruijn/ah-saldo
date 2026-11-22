@@ -5,7 +5,7 @@ body {
   --tint: #0071e3; --tint-deep: #0058cc; --link: #0066cc; --red: #d70015;
   --soon-bg: #ffefcf; --soon: #8a5200; --late-bg: #fde7e5; --late: #b3261e;
   --quiet: #8e8e93; --meter-track: #d9eafb; --track: #e3e3e8; --thumb: #fff;
-  --plus: #1d7a34; --series-in: #248a3d;
+  --plus: #1d7a34; --plus-bg: #e3f3e7; --series-in: #248a3d;
   --pass-shadow: 0 .375rem 1rem rgb(0 88 204 / .28);
   color-scheme: light;
 }
@@ -15,7 +15,7 @@ body {
     --link: #409cff; --red: #ff6961;
     --soon-bg: #3b2a08; --soon: #ffcf85; --late-bg: #3d1614; --late: #ffa198;
     --meter-track: #172b41; --track: #1c1c1e; --thumb: #48484a;
-    --plus: #30d158; --series-in: #2ea45c;
+    --plus: #30d158; --plus-bg: #0f2e18; --series-in: #2ea45c;
     --pass-shadow: none; /* a blue shadow on black reads as a glow */
     color-scheme: dark;
   }
@@ -44,7 +44,7 @@ body {
   -webkit-touch-callout: none;
 }
 ::selection { background: rgb(0 113 227 / .28); }
-h1, h2, p, ul, ol, dl, dd { margin: 0; padding: 0; }
+h1, h2, h3, p, ul, ol, dl, dd { margin: 0; padding: 0; }
 ul, ol { list-style: none; }
 a { color: inherit; text-decoration: none; }
 button { padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: inherit; cursor: pointer; }
@@ -384,7 +384,7 @@ a.summary { display: block; }
 .flow .column[aria-pressed="true"] { background: var(--fill); }
 .flow .in { fill: var(--series-in); }
 .flow .out { fill: var(--tint); }
-.legend { display: flex; justify-content: center; gap: 1.25rem; margin-top: .625rem; color: var(--label2); font-size: .8125rem; }
+.legend { display: flex; flex-wrap: wrap; justify-content: center; gap: .375rem 1.25rem; margin-top: .625rem; color: var(--label2); font-size: .8125rem; }
 .key { display: inline-block; width: .625rem; height: .625rem; margin-right: .375rem; border-radius: 99px; background: var(--series-in); }
 .key.out { background: var(--tint); }
 
@@ -395,6 +395,47 @@ a.summary { display: block; }
 .line .dot { fill: var(--tint); stroke: var(--cell); stroke-width: 2; }
 .line .hit { fill: transparent; cursor: pointer; outline-offset: -3px; }
 .axis { display: flex; justify-content: space-between; margin-top: .25rem; color: var(--label2); font-size: .8125rem; }
+
+/* ---------- insight ---------- */
+.split-head { display: flex; justify-content: space-between; gap: 1rem; }
+/* a difference in spending: more in red, less in green; the words say which, so colour is not the only sign */
+.change { flex: none; display: inline-block; padding: .125rem .5rem; border-radius: 99px; background: var(--fill); color: var(--label); font-size: .8125rem; font-weight: 600; white-space: nowrap; }
+.change.more { background: var(--late-bg); color: var(--late); }
+.change.less { background: var(--plus-bg); color: var(--plus); }
+.versus { margin-top: .75rem; }
+.meter-end { display: flex; align-items: center; gap: .5rem; }
+/* out, split into what the fixed costs took and the rest */
+.split { margin-top: 1rem; }
+.split .meter { display: block; height: .625rem; }
+.split .legend { justify-content: space-between; margin-top: .5rem; color: var(--label); }
+.key.fixed { background: var(--tint); }
+.key.rest { background: var(--meter-track); box-shadow: inset 0 0 0 1px var(--tint); }
+/* the running month added up per day: solid so far, dotted on to the forecast, the month before dashed */
+.chart-title { font-size: .9375rem; font-weight: 600; }
+.pace { display: block; width: 100%; height: auto; margin-top: .625rem; overflow: visible; }
+.pace text { fill: var(--label2); font-size: 11px; }
+.pace .grid { stroke: var(--fill); }
+.pace .base, .pace .rule { stroke: var(--line); }
+.pace .then { fill: none; stroke: var(--quiet); stroke-width: 1.6; stroke-dasharray: 4 4; stroke-linecap: round; stroke-linejoin: round; }
+.pace .area { fill: var(--tint); fill-opacity: .1; }
+.pace .stroke { fill: none; stroke: var(--tint); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+.pace .ahead { stroke: var(--tint); stroke-width: 2; stroke-dasharray: 1 5; stroke-linecap: round; }
+.pace .dot { fill: var(--tint); stroke: var(--cell); stroke-width: 2; }
+.pace .end { fill: var(--cell); stroke: var(--tint); stroke-width: 2; }
+.pace + .axis { margin-right: 11%; } /* the amounts on the right are not days */
+.legend .key.now, .legend .key.ahead, .legend .key.then { width: 1rem; height: 0; border-radius: 0; background: none; vertical-align: middle; }
+.legend .key.now { border-top: 3px solid var(--tint); }
+.legend .key.ahead { border-top: 3px dotted var(--tint); }
+.legend .key.then { border-top: 2px dashed var(--quiet); }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: .625rem; margin-top: .625rem; }
+.tile { padding: .875rem 1rem 1rem; border-radius: 1rem; background: var(--cell); }
+.tile h3 { color: var(--label2); font-size: .8125rem; font-weight: 400; }
+.tile-total { margin-top: .25rem; font-size: 1.75rem; line-height: 1.1; font-weight: 700; letter-spacing: -.02em; }
+.tile-total small { font-size: .9375rem; font-weight: 600; letter-spacing: 0; }
+.tile-note { margin-top: .625rem; font-size: .8125rem; font-weight: 600; }
+/* the day a fixed cost is expected, as a small calendar page */
+.date-badge { flex: none; display: grid; place-content: center; width: 2.75rem; height: 2.875rem; margin: -.375rem 0; border-radius: .625rem; background: var(--bg); color: var(--label2); font-size: .6875rem; font-weight: 600; line-height: 1.1; text-align: center; text-transform: uppercase; }
+.date-badge b { color: var(--label); font-size: 1.0625rem; font-weight: 700; }
 
 /* ---------- finding transactions ---------- */
 .search { display: flex; align-items: center; gap: .5rem; margin-top: .625rem; padding: .4375rem .75rem; border-radius: .75rem; background: var(--fill); color: var(--label2); }

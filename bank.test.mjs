@@ -429,6 +429,15 @@ test('fixed costs: suggested after three single monthly payments, then followed 
   assert.deepEqual(bank.fixedCosts(data, '2026-10').map((each) => each.key), ['verzekeraar']);
 });
 
+test('forecast: what is spent, the fixed costs still to come, and the rest at the pace so far', () => {
+  // 22 of 30 days: €1,274 besides the fixed costs is €57.91 a day, so 8 more days add €463.27
+  assert.equal(bank.forecast({ spent: 188600, fixedPaid: 61200, waiting: 13800, day: 22, days: 30 }), 248727);
+  // money back made the rest negative: it sets no pace at all
+  assert.equal(bank.forecast({ spent: 50000, fixedPaid: 60000, waiting: 0, day: 10, days: 30 }), 50000);
+  // on the last day nothing is added
+  assert.equal(bank.forecast({ spent: 30000, fixedPaid: 0, waiting: 0, day: 30, days: 30 }), 30000);
+});
+
 test('shiftMonth steps over year ends', () => {
   assert.equal(bank.shiftMonth('2026-01', -1), '2025-12');
   assert.equal(bank.shiftMonth('2026-11', 3), '2027-02');

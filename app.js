@@ -4,7 +4,7 @@ import {
   validCode, validNumber,
 } from './logic.js';
 import {
-  AH, START_CATS, US, addBalance, addFile, addStarter, balanceOn, byParty, cardsOn, catchUp, decodeText, dueOn, emptyBank, figures, fixedCosts,
+  AH, START_CATS, US, addBalance, addFile, addStarter, balanceOn, byParty, cardsOn, catchUp, decodeText, dueOn, emptyBank, figures, fixedCosts, forecast,
   fixedSuggestions, forWhom, giftGuesses, giftsBought, giftsToFill, hasGap, heldShops, inCategory, monthOf, parseBank, payFrom, readCsv,
   addLinked, readLinked, readOpenbank, ruleKey, shiftMonth, sorter,
 } from './bank.js';
@@ -503,7 +503,7 @@ const monthFigures = (month) => figures(bank, state.purchases, ...monthRange(mon
 const cardTotal = () => state.cards.reduce((sum, card) => sum + Math.max(balance(card), 0), 0);
 
 // What the screens of the bank side are looking at. It lasts until the app is closed.
-const view = { month: thisMonth(), unit: 'month', worth: '', query: '', cat: 'all', acc: 'all', rows: 60 };
+const view = { month: thisMonth(), unit: 'month', query: '', cat: 'all', acc: 'all', rows: 60 };
 
 const cardById = (id) => state.cards.find((card) => card.id === id);
 const purchaseById = (id) => state.purchases.find((purchase) => purchase.id === id);
@@ -828,12 +828,17 @@ function balanceScreen(account) {
 const pots = () => bank.cats.filter((cat) => cat.kind === 'out' && cat.budget);
 const openCount = () => inCategory(bank, '', '', '9999').length;
 
-// "9 van 12 betaald", for the fixed costs of a month
+// "9 van 12 betaald", for the fixed costs of a month, with what they paid and what is still expected
 function fixedSummary(month) {
   const costs = fixedCosts(bank, month);
   const paid = costs.filter((cost) => cost.paid).length;
-  return { costs, text: L(`${paid} van ${costs.length} betaald`, `${paid} of ${costs.length} paid`), total: costs.reduce((sum, cost) => sum + cost.paid, 0) };
+  return {
+    costs, text: L(`${paid} van ${costs.length} betaald`, `${paid} of ${costs.length} paid`), total: costs.reduce((sum, cost) => sum + cost.paid, 0),
+    waiting: costs.filter((cost) => !cost.paid).reduce((sum, cost) => sum + cost.expected, 0),
+  };
 }
+// the newest payment to a counterparty, by its rule key
+const lastPaid = (key) => bank.txs.filter((tx) => ruleKey(tx.name) === key).sort((a, b) => b.date.localeCompare(a.date))[0];
 
 function accountRows(date) {
   return bank.accounts.map((account) => (account.shop ? `
@@ -1051,10 +1056,8 @@ function categoryScreen(id) {
 }
 
 function fixedScreen() {
-  const { costs, total } = fixedSummary(view.month);
-  const waiting = costs.filter((cost) => !cost.paid).reduce((sum, cost) => sum + cost.expected, 0);
+  const { costs, total, waiting } = fixedSummary(view.month);
   const catOf = sorter(bank);
-  const latest = (key) => bank.txs.filter((tx) => ruleKey(tx.name) === key).sort((a, b) => b.date.localeCompare(a.date))[0];
   const suggestions = fixedSuggestions(bank, thisMonth());
   const status = (cost) => (!cost.paid ? L('Nog niet betaald', 'Not paid yet')
     : cost.expected && cost.paid !== cost.expected ? L(`Betaald · de keer ervoor ${formatEuro(cost.expected)}`, `Paid · last time ${formatEuro(cost.expected)}`)
@@ -1069,8 +1072,8 @@ function fixedScreen() {
       </section>
       ${costs.length ? `
         <ul class="group">${costs.map((cost) => `
-          <li><button class="row" data-action="tx" data-id="${esc(latest(cost.key).id)}">
-            <span class="row-main">${esc(cost.name)} <small>${status(cost)} · ${catName(catOf(latest(cost.key)))}</small></span>
+          <li><button class="row" data-action="tx" data-id="${esc(lastPaid(cost.key).id)}">
+            <span class="row-main">${esc(cost.name)} <small>${status(cost)} · ${catName(catOf(lastPaid(cost.key)))}</small></span>
             <span class="amount${cost.paid ? '' : ' quiet'}">${formatEuro(cost.paid || cost.expected)}</span>
           </button></li>`).join('')}</ul>`
       : `<p class="group-note">${L('Een vaste last is iets dat je elke maand betaalt. Kies hieronder Ja bij een voorstel, of zet bij een transactie de schakelaar Vaste last aan.',
@@ -1100,6 +1103,54 @@ function chartMonths() {
   return all.filter((month) => month >= first && month <= thisMonth());
 }
 
+const daysIn = (month) => new Date(Number(month.slice(0, 4)), Number(month.slice(5)), 0).getDate();
+// the end of the first `day` days of `month`, as the `to` of figures(); a shorter month is over sooner
+const afterDay = (month, day) => (day < daysIn(month) ? `${month}-${String(day + 1).padStart(2, '0')}` : `${shiftMonth(month, 1)}-01`);
+// whole euros: a forecast or a difference is no more exact than that
+const wholeEuro = (cents) => (cents < 0 ? `− ${wholeEuro(-cents)}`
+  : Math.round(cents / 100).toLocaleString(LOCALE, { style: 'currency', currency: 'EUR', minimumFractionDigits: 0, maximumFractionDigits: 0 }));
+// a difference in spending as a label: more in red, less in green, within a euro grey
+function change(cents, text) {
+  const euros = Math.round(cents / 100);
+  return `<span class="change${euros > 0 ? ' more' : euros < 0 ? ' less' : ''}">${text
+    ?? (euros ? `${euros > 0 ? '+' : '−'} ${wholeEuro(Math.abs(cents))}` : L('gelijk', 'same'))}</span>`;
+}
+
+// The running month added up day by day, the month before as a dashed line beside it, and a dotted line on to
+// what the month will have cost at its end (`ahead`).
+function paceChart(month, day, ahead) {
+  const before = shiftMonth(month, -1);
+  const days = daysIn(month);
+  const added = (each, last) => Array.from({ length: last }, (unused, index) => figures(bank, state.purchases, `${each}-01`, afterDay(each, index + 1)).spending);
+  const now = added(month, day);
+  const then = `${before}-01` >= bank.since ? added(before, daysIn(before)) : [];
+  const top = Math.max(100, ahead, ...now, ...then) * 1.08;
+  const step = [5000, 10000, 20000, 50000, 100000, 200000, 500000].find((each) => top / each <= 3) ?? 1000000;
+  const x = (nth) => (4 + (nth - 1) / 30 * 280).toFixed(1);
+  const y = (cents) => (160 - cents / top * 144).toFixed(1);
+  const line = (list) => list.map((cents, index) => `${x(index + 1)},${y(cents)}`).join(' ');
+  const grid = Array.from({ length: Math.floor(top / step) }, (unused, index) => (index + 1) * step);
+  const compact = (cents) => (cents / 100).toLocaleString(LOCALE, { style: 'currency', currency: 'EUR', notation: 'compact' });
+  const last = then.length ? `, ${wholeEuro(then.at(-1))} ${L('in', 'in')} ${monthName(before)}` : '';
+  return `
+    <svg class="pace" viewBox="0 0 320 180" role="img" aria-label="${L(`Uitgegeven, per dag opgeteld: ${wholeEuro(now.at(-1))} tot nu, in dit tempo ${wholeEuro(ahead)} aan het eind van de maand${last}`,
+      `Spending added up per day: ${wholeEuro(now.at(-1))} so far, at this pace ${wholeEuro(ahead)} by the end of the month${last}`)}">
+      ${grid.map((cents) => `<line class="grid" x1="4" x2="288" y1="${y(cents)}" y2="${y(cents)}"/>
+        <text x="318" y="${(Number(y(cents)) + 4).toFixed(1)}" text-anchor="end">${compact(cents)}</text>`).join('')}
+      <line class="base" x1="4" x2="288" y1="160" y2="160"/>
+      ${then.length ? `<polyline class="then" points="${line(then)}"/>` : ''}
+      <path class="area" d="M${x(1)} 160L${line(now).replaceAll(' ', 'L')}L${x(day)} 160Z"/>
+      <polyline class="stroke" points="${line(now)}"/>
+      <line class="ahead" x1="${x(day)}" y1="${y(now.at(-1))}" x2="${x(days)}" y2="${y(ahead)}"/>
+      <line class="rule" x1="${x(day)}" x2="${x(day)}" y1="10" y2="160"/>
+      <circle class="dot" cx="${x(day)}" cy="${y(now.at(-1))}" r="5"/>
+      <circle class="end" cx="${x(days)}" cy="${y(ahead)}" r="4"/>
+    </svg>
+    <p class="axis"><span>${dayShort(`${month}-01`)}</span><span>${dayShort(`${month}-${days}`)}</span></p>
+    <p class="legend"><span><i class="key now"></i>${L('Deze maand', 'This month')}</span><span><i class="key ahead"></i>${L('Verwacht', 'Forecast')}</span>${
+      then.length ? `<span><i class="key then"></i>${monthShort(before)} ${wholeEuro(then.at(-1))}</span>` : ''}</p>`;
+}
+
 function insightScreen() {
   const yearly = view.unit === 'year';
   const year = yearOf(view.month);
@@ -1110,7 +1161,40 @@ function insightScreen() {
   const kinds = new Map(bank.cats.map((cat) => [cat.id, cat.kind]));
   const spent = [...now.byCat].filter(([id, cents]) => (kinds.get(id) ?? (cents > 0 ? 'out' : '')) === 'out' && cents > 0).sort((a, b) => b[1] - a[1]);
   const earned = [...now.byCat].filter(([id]) => kinds.get(id) === 'in').sort((a, b) => b[1] - a[1]);
-  const before = [1, 2, 3].map((back) => monthFigures(shiftMonth(view.month, -back)).spending);
+  // A running month is held against the same first days of the three months before; a month that is over, against them whole.
+  const running = !yearly && view.month === thisMonth();
+  const day = Number(isoDate().slice(8));
+  const days = daysIn(view.month);
+  const open = running && day < days; // days are left: the rest of the month has something to say
+  const before = [1, 2, 3].map((back) => shiftMonth(view.month, -back));
+  const whole = before.map(monthFigures);
+  const sofar = before.map((month, index) => (running ? figures(bank, state.purchases, `${month}-01`, afterDay(month, day)) : whole[index]));
+  const known = (index) => `${before[index]}-01` >= bank.since && whole[index].spending > 0; // in the data from its first day
+  const usual = !yearly && [0, 1, 2].every(known) ? (id) => average(sofar.map((each) => Math.max(0, each.byCat.get(id) ?? 0))) : null;
+  const average3 = usual ? average(whole.map((each) => each.spending)) : 0;
+  let versus = '';
+  if (!yearly && known(0)) {
+    const diff = now.spending - sofar[0].spending;
+    const date = new Date(`${before[0]}-${String(Math.min(day, daysIn(before[0]))).padStart(2, '0')}`)
+      .toLocaleDateString(LOCALE, { day: 'numeric', month: 'long', timeZone: 'UTC' });
+    const month = monthDate(before[0]).toLocaleDateString(LOCALE, { month: 'long' });
+    const [nl, en] = running ? [`op ${date}`, `by ${date}`] : [`in ${month}`, `in ${month}`];
+    versus = `<p class="center versus">${change(diff, Math.round(diff / 100) === 0 ? L(`Evenveel als ${nl}`, `The same as ${en}`)
+      : L(`${wholeEuro(Math.abs(diff))} ${diff > 0 ? 'meer' : 'minder'} dan ${nl}`, `${wholeEuro(Math.abs(diff))} ${diff > 0 ? 'more' : 'less'} than ${en}`))}</p>`;
+  }
+  const fixed = fixedSummary(view.month);
+  const fixedRow = !yearly && fixed.costs.length ? `
+    <a class="row" href="#/vast"><span class="row-main">${L('Vaste lasten', 'Fixed costs')} <small>${fixed.text}</small></span>
+      <span class="amount">${formatEuro(fixed.total)}</span>${icon('next')}</a>` : '';
+  const catOf = sorter(bank);
+  // the fixed costs still to come this month, on the day of the month they were paid the last time
+  const coming = !open ? [] : fixed.costs.filter((cost) => !cost.paid && cost.expected)
+    .map((cost) => ({ cost, tx: lastPaid(cost.key) }))
+    .map((each) => ({ ...each, date: Math.min(Number(each.tx.date.slice(8)), days) }))
+    .sort((a, b) => a.date - b.date);
+  const ahead = forecast({ spent: now.spending, fixedPaid: fixed.total, waiting: fixed.waiting, day, days });
+  const room = average3 - now.spending - fixed.waiting; // what may still go out and stay under the average
+  const daysLeft = days - day;
   // From what was left to what the net worth did. Money that only moved is not spending, but a loan repaid or
   // money sent to an account the app does not hold did leave the accounts; the rest is the gift cards (a card
   // is worth more than it cost, and balance can be added or corrected by hand).
@@ -1119,13 +1203,10 @@ function insightScreen() {
   const worthIs = worthOn(dayBefore(to));
   const moves = bank.cats.filter((cat) => cat.kind === 'none').map((cat) => [cat, now.moved.get(cat.id) ?? 0]).filter(([, cents]) => cents);
   const cardGain = worthIs - worthWas - left - moves.reduce((sum, [, cents]) => sum + cents, 0);
-  const versus = (label, detail, other) => (other ? `
-    <li class="row"><span class="row-main">${label} <small>${detail}</small></span>
-      <span class="amount">${formatEuro(Math.abs(now.spending - other))} ${now.spending > other ? L('meer', 'more') : L('minder', 'less')}</span></li>` : '');
-  // net worth at the end of each month; the running month stands at today
+  // net worth at the end of each month; the running month stands at today. The chart marks the month on screen.
   const points = chartMonths().map((month) => ({ id: month, name: monthShort(month), cents: worthOn(month === thisMonth() ? '9999' : `${month}-31`) }));
-  const worthMonth = points.some((point) => point.id === view.worth) ? view.worth : points.at(-1)?.id;
-  const fixed = fixedSummary(view.month);
+  const worthMonth = points.some((point) => point.id === view.month) ? view.month : points.at(-1)?.id;
+  const links = (coming.length ? '' : fixedRow) + savedRow(from, to);
   if (!bank.accounts.length) {
     return { html: `<header class="large-title"><h1>${L('Inzicht', 'Insight')}</h1></header>
       ${blank(L('Nog niets te zien', 'Nothing to see yet'), L('Upload eerst je bankbestanden op Overzicht.', 'Upload your bank files on Overview first.'))}` };
@@ -1141,18 +1222,81 @@ function insightScreen() {
         ${yearly ? stepper(year, year >= yearOf(thisMonth())) : monthStepper()}
         <dl class="trio">
           <div><dt>${L('In', 'In')}</dt><dd>${formatEuro(now.income)}</dd></div>
-          <div><dt>${L('Uit', 'Out')}</dt><dd>${formatEuro(now.spending)}</dd></div>
+          <div><dt>${running ? L('Uit tot nu', 'Out so far') : L('Uit', 'Out')}</dt><dd>${formatEuro(now.spending)}</dd></div>
           <div><dt>${left < 0 ? L('Tekort', 'Short') : L('Over', 'Left')}</dt><dd class="${short ? 'over-text' : ''}">${formatEuro(Math.abs(left))}</dd></div>
         </dl>
         ${now.income > 0 && left > 0 ? `<p class="footnote center">${Math.round(left / now.income * 100)}% ${L('van wat binnenkwam bleef over', 'of what came in was left')}</p>` : ''}
+        ${versus}
+        ${!yearly && fixed.total > 0 && now.spending > 0 ? `
+          <div class="split">
+            ${meterBar(fixed.total / now.spending)}
+            <p class="legend"><span><i class="key fixed"></i>${L('Vaste lasten', 'Fixed costs')} ${formatEuro(fixed.total)}</span>
+              <span><i class="key rest"></i>${L('De rest', 'The rest')} ${formatEuro(Math.max(0, now.spending - fixed.total))}</span></p>
+          </div>` : ''}
         ${flowChart(chartMonths(), yearly ? '' : view.month)}
       </section>
-      ${yearly ? '' : `<ul class="group">
-        ${versus(L('Uit, tegen de maand ervoor', 'Out, against the month before'), monthName(shiftMonth(view.month, -1)), before[0])}
-        ${versus(L('Uit, tegen het gemiddelde', 'Out, against the average'), L('van de drie maanden ervoor', 'of the three months before'), before.every(Boolean) ? average(before) : 0)}
-      </ul>`}
+      ${open ? `
+        <h2 class="section split-head"><span>${L('Rest van de maand', 'Rest of the month')}</span>
+          <span>${daysLeft === 1 ? L('nog 1 dag', '1 day left') : L(`nog ${daysLeft} dagen`, `${daysLeft} days left`)}</span></h2>
+        <section class="summary">
+          <h3 class="chart-title">${L('Uitgegeven tot nu, per dag opgeteld', 'Spent so far, added up per day')}</h3>
+          ${paceChart(view.month, day, ahead)}
+        </section>
+        <div class="tiles">
+          <section class="tile">
+            <h3>${L('In dit tempo', 'At this pace')}</h3>
+            <p class="tile-total">${wholeEuro(ahead)}</p>
+            <p class="footnote">${L(`uitgegeven op ${dayShort(`${view.month}-${days}`)}`, `spent by ${dayShort(`${view.month}-${days}`)}`)}</p>
+            ${average3 ? `<p class="tile-note ${ahead > average3 ? 'over-text' : 'plus'}">${ahead > average3
+              ? L(`${wholeEuro(ahead - average3)} boven je gemiddelde`, `${wholeEuro(ahead - average3)} over your average`)
+              : L(`${wholeEuro(average3 - ahead)} onder je gemiddelde`, `${wholeEuro(average3 - ahead)} under your average`)}</p>` : ''}
+          </section>
+          ${!average3 ? '' : room > 0 ? `
+            <section class="tile">
+              <h3>${L('Onder je gemiddelde blijven', 'Stay under your average')}</h3>
+              <p class="tile-total">${wholeEuro(room / daysLeft)} <small>${L('per dag', 'a day')}</small></p>
+              <p class="footnote">${daysLeft === 1 ? L('voor de laatste dag', 'for the last day') : L(`voor de ${daysLeft} dagen die over zijn`, `for the ${daysLeft} days left`)}${
+                fixed.waiting ? L(', na de vaste lasten die nog komen', ', after the fixed costs still to come') : ''}</p>
+            </section>` : `
+            <section class="tile">
+              <h3>${L('Boven je gemiddelde', 'Over your average')}</h3>
+              <p class="tile-total over-text">${wholeEuro(-room)}</p>
+              <p class="footnote">${fixed.waiting ? L('al, met de vaste lasten die nog komen', 'already, with the fixed costs still to come') : L('al, deze maand', 'already, this month')}</p>
+            </section>`}
+        </div>
+        ${average3 ? `<p class="group-note">${L('Je gemiddelde is wat er de drie maanden ervoor gemiddeld uitging.', 'Your average is what went out on average in the three months before.')}</p>` : ''}
+        ${coming.length ? `
+          <h2 class="section split-head"><span>${L('Vaste lasten die nog komen', 'Fixed costs still to come')}</span><span>${formatEuro(fixed.waiting)}</span></h2>
+          <ul class="group">${coming.map(({ cost, tx, date }) => `
+            <li class="row"><span class="date-badge"><b>${date}</b>${monthShort(view.month)}</span>
+              <span class="row-main">${esc(cost.name)} <small>${catName(catOf(tx))}</small></span>
+              <span class="amount quiet">${formatEuro(cost.expected)}</span></li>`).join('')}
+            <li>${fixedRow}</li>
+          </ul>` : ''}` : ''}
+      ${spent.length ? `
+        <h2 class="section split-head"><span>${L('Uitgaven per categorie', 'Spending per category')}</span>${usual ? `<span>${L('t.o.v. normaal', 'vs usual')}</span>` : ''}</h2>
+        <ul class="group">${spent.map(([id, cents]) => `
+          <li><a class="row meter-row" href="#/categorie/${id || 'open'}">
+            <span class="row-main${id ? '' : ' todo'}">${catName(id)} <small class="inline">${Math.round(cents / now.spending * 100)}%</small></span>
+            <span class="meter-end">${usual && id ? change(cents - usual(id)) : ''}${formatEuro(cents)}</span>
+            ${meterBar(cents / now.spending, { rank: true })}
+          </a></li>`).join('')}</ul>
+        ${usual ? `<p class="group-note">${running
+          ? L(`Normaal is wat je in de eerste ${day} dagen uitgaf, gemiddeld over de drie maanden ervoor.`, `Usual is what you spent in the first ${day} days, on average over the three months before.`)
+          : L('Normaal is het gemiddelde van de drie maanden ervoor.', 'Usual is the average of the three months before.')}</p>` : ''}` : ''}
+      ${links && `<div class="group">${links}</div>`}
+      ${earned.length ? `
+        <h2 class="section">${L('Inkomen', 'Income')}</h2>
+        <ul class="group">${earned.map(([id, cents]) => `
+          <li><a class="row" href="#/categorie/${id}"><span class="row-main">${catName(id)}</span><span class="amount">${formatEuro(cents)}</span>${icon('next')}</a></li>`).join('')}</ul>` : ''}
+      ${points.length || moves.length || cardGain ? `<h2 class="section">${L('Vermogen', 'Net worth')}</h2>` : ''}
+      ${points.length ? `
+        <section class="summary worth">
+          <p class="footnote">${worthMonth === thisMonth() ? L('Nu', 'Now') : `${L('Eind', 'End of')} ${monthName(worthMonth)}`}</p>
+          <p class="total small">${formatEuro(points.find((point) => point.id === worthMonth).cents)}</p>
+          ${lineChart(points, worthMonth, 'pickMonth')}
+        </section>` : ''}
       ${moves.length || cardGain ? `
-        <h2 class="section">${L('Over en vermogen', 'Left over and net worth')}</h2>
         <ul class="group">
           <li class="row"><span class="row-main">${left < 0 ? L('Tekort', 'Short') : L('Over', 'Left')}</span><span class="amount">${signed(left)}</span></li>
           ${moves.map(([cat, cents]) => `
@@ -1167,29 +1311,7 @@ function insightScreen() {
         </ul>
         <p class="group-note">${L('Geld dat je aflost of wegzet telt niet als uitgave, maar gaat wel van je rekeningen af. Daarom groeit je vermogen niet altijd met wat over is.',
           'Money you repay or set aside does not count as spending, but it does leave your accounts. That is why your net worth does not always grow by what is left.')}</p>` : ''}
-      ${spent.length ? `
-        <h2 class="section">${L('Uitgaven per categorie', 'Spending per category')}</h2>
-        <ul class="group">${spent.map(([id, cents]) => `
-          <li><a class="row meter-row" href="#/categorie/${id || 'open'}">
-            <span class="row-main${id ? '' : ' todo'}">${catName(id)}</span>
-            <span>${formatEuro(cents)} <small class="inline">${Math.round(cents / now.spending * 100)}%</small></span>
-            ${meterBar(cents / now.spending, { rank: true })}
-          </a></li>`).join('')}</ul>` : ''}
-      ${earned.length ? `
-        <h2 class="section">${L('Inkomen', 'Income')}</h2>
-        <ul class="group">${earned.map(([id, cents]) => `
-          <li><a class="row" href="#/categorie/${id}"><span class="row-main">${catName(id)}</span><span class="amount">${formatEuro(cents)}</span>${icon('next')}</a></li>`).join('')}</ul>` : ''}
-      ${yearly || !fixed.costs.length ? '' : `
-        <div class="group"><a class="row" href="#/vast"><span class="row-main">${L('Vaste lasten', 'Fixed costs')} <small>${fixed.text}</small></span>
-          <span class="amount">${formatEuro(fixed.total)}</span>${icon('next')}</a></div>`}
-      ${savedRow(from, to) && `<div class="group">${savedRow(from, to)}</div>`}
       ${points.length ? `
-        <h2 class="section">${L('Vermogen', 'Net worth')}</h2>
-        <section class="summary worth">
-          <p class="footnote">${worthMonth === thisMonth() ? L('Nu', 'Now') : `${L('Eind', 'End of')} ${monthName(worthMonth)}`}</p>
-          <p class="total small">${formatEuro(points.find((point) => point.id === worthMonth).cents)}</p>
-          ${lineChart(points, worthMonth, 'pickWorth')}
-        </section>
         <ul class="group">
           ${bank.accounts.map((account) => `<li class="row"><span class="row-main">${esc(nameOf(account))}</span>
             <span class="amount">${formatEuro(balanceOn(bank, account, worthMonth === thisMonth() ? '9999' : `${worthMonth}-31`))}</span></li>`).join('')}
@@ -2327,17 +2449,14 @@ const actions = {
     view.month = month > thisMonth() ? thisMonth() : month;
     redraw(`[data-by="${button.dataset.by}"]`);
   },
+  // a column of a chart or a month on the net worth line: focus stays on the same kind of thing
   pickMonth(card, button) {
     Object.assign(view, { month: button.dataset.id, unit: 'month' });
-    redraw('.column[aria-pressed="true"]');
+    redraw(`.${button.classList[0]}[aria-pressed="true"]`);
   },
   unit(card, button) {
     view.unit = button.dataset.id;
     redraw(`[data-action="unit"][data-id="${view.unit}"]`);
-  },
-  pickWorth(card, button) {
-    view.worth = button.dataset.id;
-    redraw('.hit[aria-pressed="true"]');
   },
   moreRows() {
     view.rows += 100;
