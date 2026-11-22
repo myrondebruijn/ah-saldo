@@ -424,7 +424,7 @@ a.summary { display: block; }
 .pace .end { fill: var(--cell); stroke: var(--tint); stroke-width: 2; }
 .pace + .axis { margin-right: 11%; } /* the amounts on the right are not days */
 .legend .key.now, .legend .key.ahead, .legend .key.then { width: 1rem; height: 0; border-radius: 0; background: none; vertical-align: middle; }
-.legend .key.now { border-top: 3px solid var(--tint); }
+.legend .key.now { height: 3px; background: var(--tint); }
 .legend .key.ahead { border-top: 3px dotted var(--tint); }
 .legend .key.then { border-top: 2px dashed var(--quiet); }
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: .625rem; margin-top: .625rem; }
