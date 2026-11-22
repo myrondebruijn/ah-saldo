@@ -854,7 +854,8 @@ function overviewScreen() {
   const month = thisMonth();
   const now = monthFigures(month);
   const today = isoDate();
-  const oldest = Math.max(0, ...bank.accounts.filter((account) => !account.shop).map((account) => daysLeft(today, isoDate(new Date(account.uploaded)))));
+  // an account with nothing on it (the savings account kept at 0) needs no new files
+  const oldest = Math.max(0, ...bank.accounts.filter((account) => !account.shop && account.balance !== 0).map((account) => daysLeft(today, isoDate(new Date(account.uploaded)))));
   const fixed = fixedSummary(month);
   const suggested = fixedSuggestions(bank, month).length;
   const open = openCount();
