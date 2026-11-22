@@ -186,47 +186,79 @@ export function readOpenbank(items) {
   });
   if (!lines.length || lines.at(-1).after !== toCents(closing.replace(' EUR', ''))) throw broken();
 
-  const seen = new Map();
-  const txs = lines.map((line) => {
-    const concept = tidy(line.words.sort((a, b) => b.y - a.y || a.x - b.x).map((item) => item.str).join(' '));
-    const match = /^(?:ONMIDDELLIJKE )?OVERBOEKING (?:VAN|TEN GUNSTE VAN) (.+?)(?:,? REFERENTIE ?(.*))?$/.exec(concept);
-    const name = (match?.[1] ?? concept) || '?';
-    const mark = `${line.str}.${line.cents}.${line.after}.${hash(concept)}`;
-    seen.set(mark, (seen.get(mark) ?? -1) + 1);
-    return {
-      id: `${iban}.${mark}.${seen.get(mark)}`, acc: iban, date: line.str, cents: line.cents,
-      name: name.slice(0, 60), text: (match?.[2] ?? '').slice(0, 100),
-      ...(holder && sameWords(name, holder) && { own: true }), // to or from another account of the same person
-    };
-  });
+  const txs = openbankTxs(iban, holder, lines.map((line) => ({
+    date: line.str, cents: line.cents, after: line.after,
+    concept: tidy(line.words.sort((a, b) => b.y - a.y || a.x - b.x).map((item) => item.str).join(' ')),
+  })));
   return checked({
     accounts: [{ id: iban, name: `Openbank ${iban.slice(-4)}`, bank: 'Openbank', balance: lines.at(-1).after, ...(holder && { holder: holder.slice(0, 30) }) }],
     txs,
   });
 }
 
-// What the Kassa server fetched through the Rabo link (Enable Banking): [{ iban, txs, balances }] as the bank
-// sends them. A line's entry_reference is the Volgnr of the CSV export and the other fields hold what its columns
-// hold, so a line has the same id and text whichever way it came in. The date is the booking date, which the
-// CSV shows one day later for a few lines. May hold no new lines at all; is otherwise read whole or not at all.
+// Openbank lines, oldest first: { date, cents, after (the balance after it), concept (its description) }. The
+// statement and the bank link both come here, so a line gets the same id whichever way it came in.
+function openbankTxs(iban, holder, lines) {
+  const seen = new Map();
+  return lines.map(({ date, cents, after, concept }) => {
+    const match = /^(?:ONMIDDELLIJKE )?OVERBOEKING (?:VAN|TEN GUNSTE VAN) (.+?)(?:,? REFERENTIE ?(.*))?$/.exec(concept);
+    const name = (match?.[1] ?? concept) || '?';
+    const mark = `${date}.${cents}.${after}.${hash(concept)}`;
+    seen.set(mark, (seen.get(mark) ?? -1) + 1);
+    return {
+      id: `${iban}.${mark}.${seen.get(mark)}`, acc: iban, date, cents,
+      name: name.slice(0, 60), text: (match?.[2] ?? '').slice(0, 100),
+      ...(holder && sameWords(name, holder) && { own: true }), // to or from another account of the same person
+    };
+  });
+}
+
+// What the Kassa server fetched through the bank links (Enable Banking): [{ iban, bank, holder, txs, balances }],
+// the lines and balances as the bank sends them; `bank` is 'Rabo' (also when missing) or 'Openbank'. Each line gets
+// the id, date and words it has when read from the bank's own file, so nothing is added twice. May hold no new lines
+// at all; is otherwise read whole or not at all.
 export function readLinked(list) {
   const toCents = (amount) => (/^-?\d+(\.\d{1,2})?$/.test(amount) ? Math.round(Number(amount) * 100) : null);
+  const signed = (line) => {
+    const cents = toCents(line.transaction_amount?.amount);
+    if (cents === null || !['DBIT', 'CRDT'].includes(line.credit_debit_indicator)) throw broken();
+    return line.credit_debit_indicator === 'DBIT' ? -cents : cents;
+  };
   const accounts = [];
   const txs = [];
-  for (const { iban, txs: lines, balances } of list) {
+  for (const { iban, bank = 'Rabo', holder, txs: lines, balances } of list) {
     const booked = balances.find((each) => each.balance_type === 'ITBD') ?? balances.find((each) => each.balance_type === 'CLBD');
     const balance = booked && toCents(booked.balance_amount.amount);
-    accounts.push({ id: iban, name: `Rabo ${iban.slice(-4)}`, bank: 'Rabo', ...(Number.isInteger(balance) && { balance }) });
-    // oldest first, as in the CSV: lists keep that order within a day (the link sends the newest first)
-    for (const line of lines.filter((each) => each.status === 'BOOK').sort((a, b) => a.entry_reference - b.entry_reference)) {
+    const owner = tidy(holder).slice(0, 30);
+    accounts.push({ id: iban, name: `${bank} ${iban.slice(-4)}`, bank, ...(Number.isInteger(balance) && { balance }), ...(bank === 'Openbank' && owner && { holder: owner }) });
+    const done = lines.filter((each) => each.status === 'BOOK'); // booked; pending lines may still change
+    if (bank === 'Openbank') {
+      // A day's lines are numbered from the last one down (2026-11-18.3 came before 2026-11-18.2), and no line
+      // says the balance after it: that is worked back from the balance now, as the statement's ids need it.
+      if (!Number.isInteger(balance) || !done.every((line) => /^\d{4}-\d{2}-\d{2}\.\d+$/.test(line.entry_reference))) throw broken();
+      const counter = (line) => Number(line.entry_reference.split('.').pop());
+      const sorted = done.sort((a, b) => a.booking_date.localeCompare(b.booking_date) || counter(b) - counter(a)).map((line) => ({ line, cents: signed(line) }));
+      const afters = [];
+      let after = balance; // after the newest line
+      for (let index = sorted.length - 1; index >= 0; index--) {
+        afters[index] = after;
+        after -= sorted[index].cents;
+      }
+      txs.push(...openbankTxs(iban, owner, sorted.map(({ line, cents }, index) => ({
+        date: line.booking_date, cents, after: afters[index], concept: tidy((line.remittance_information ?? []).join(' ')),
+      }))));
+      continue;
+    }
+    // Rabo: entry_reference is the Volgnr of the CSV export and the other fields hold what its columns hold. The date
+    // is the booking date, which the CSV shows one day later for a few lines. Oldest first, as in the CSV.
+    for (const line of done.sort((a, b) => a.entry_reference - b.entry_reference)) {
+      if (!/^\d+$/.test(line.entry_reference)) throw broken();
       const debit = line.credit_debit_indicator === 'DBIT';
-      const cents = toCents(line.transaction_amount.amount);
-      if (!/^\d+$/.test(line.entry_reference) || cents === null || !['DBIT', 'CRDT'].includes(line.credit_debit_indicator)) throw broken();
       const name = tidy((debit ? line.creditor : line.debtor)?.name);
       const text = tidy((line.remittance_information ?? []).join(' '));
       const other = (debit ? line.creditor_account : line.debtor_account)?.iban;
       txs.push({
-        id: `${iban}.${Number(line.entry_reference)}`, acc: iban, date: line.booking_date, cents: debit ? -cents : cents,
+        id: `${iban}.${Number(line.entry_reference)}`, acc: iban, date: line.booking_date, cents: signed(line),
         name: (name || text || '?').slice(0, 60), text: text.slice(0, 100),
         ...(other && { iban: other }),
         ...(line.bank_transaction_code?.sub_code === 'cc' && { own: true }), // as the CSV's Code 'cc': paying off the credit card
@@ -235,6 +267,19 @@ export function readLinked(list) {
   }
   if (!txs.every(isTx) || !accounts.every(isAccount)) throw broken();
   return { accounts, txs };
+}
+
+// Adds what the bank links brought; returns { added, skipped: ids of accounts left for the next fetch }. An Openbank
+// line's id hangs on the balance after it, so one line booked between fetching the lines and the balance would change
+// them all: when a line from before the last day already saved is not known, that account waits for the next fetch.
+export function addLinked(bank, file, now) {
+  const known = new Set(bank.txs.map((tx) => tx.id));
+  const skipped = file.accounts.filter((account) => account.bank === 'Openbank').map((account) => account.id).filter((id) => {
+    const through = bank.accounts.find((each) => each.id === id)?.through ?? '';
+    return file.txs.some((tx) => tx.acc === id && tx.date < through && !known.has(tx.id));
+  });
+  const kept = (id) => !skipped.includes(id);
+  return { added: addFile(bank, { accounts: file.accounts.filter((account) => kept(account.id)), txs: file.txs.filter((tx) => kept(tx.acc)) }, now), skipped };
 }
 
 // Adds what a file holds to the saved bank data and returns how many of its transactions were new.

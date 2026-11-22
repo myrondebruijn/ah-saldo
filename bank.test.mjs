@@ -179,6 +179,35 @@ test('the Rabo link gives the lines of the CSV the same ids and texts, so only n
   assert.throws(() => bank.readLinked([{ ...LINKED[0], txs: [{ ...LINKED[0].txs[0], transaction_amount: { amount: '4,00' } }] }]), /broken/);
 });
 
+// The made-up Openbank statement above as its bank link sends it: a day's lines numbered from the newest (1) back,
+// no balance per line, only the balance now.
+function openbankLink(rows, balance) {
+  const counters = new Map();
+  const txs = rows.map(([date, concept, amount]) => { // newest first, as on the statement
+    counters.set(date, (counters.get(date) ?? 0) + 1);
+    return {
+      entry_reference: `${date}.${counters.get(date)}`, status: 'BOOK', booking_date: date, value_date: date,
+      credit_debit_indicator: amount.startsWith('-') ? 'DBIT' : 'CRDT', transaction_amount: { currency: 'EUR', amount: amount.replace('-', '') },
+      remittance_information: [concept.join(' ')],
+    };
+  });
+  return [{ iban: 'ES0000730100550000000001', bank: 'Openbank', holder: 'Anna Test', txs, balances: [{ balance_type: 'CLBD', balance_amount: { amount: balance } }] }];
+}
+
+test('the Openbank link gives the lines of the statement the same ids, by working back from the balance', () => {
+  const pdf = bank.readOpenbank(statement(OPENBANK, { closing: '14.88' }));
+  assert.deepEqual(bank.readLinked(openbankLink(OPENBANK, '14.88')).txs, pdf.txs); // own transfers included
+  const data = bank.emptyBank();
+  bank.addFile(data, pdf, NOW);
+  const newer = [['2026-07-04', ['OVERBOEKING TEN GUNSTE VAN Bakker'], '-4.88', '10.00'], ...OPENBANK];
+  assert.deepEqual(bank.addLinked(data, bank.readLinked(openbankLink(newer, '10.00')), NOW), { added: 1, skipped: [] });
+  assert.equal(data.accounts[0].balance, 1000);
+  // a line missing in between moves every balance before it, so the ids no longer match: wait for the next fetch
+  const holed = openbankLink(newer.filter((row, index) => index !== 2), '10.00');
+  assert.deepEqual(bank.addLinked(data, bank.readLinked(holed), NOW), { added: 0, skipped: ['ES0000730100550000000001'] });
+  assert.equal(data.txs.length, 7);
+});
+
 test('a balance on an earlier day follows from what was booked after it', () => {
   const data = loaded();
   const [account] = data.accounts;

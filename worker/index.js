@@ -12,11 +12,12 @@
 // GET  /invite/:id    -> { wrapped }                  the invited phone fetches it
 // DELETE /invite                                      (token) the invite was used
 //
-// The Rabo link (Enable Banking): unlike the rest, the server sees these transactions, on their way to the phone;
-// it keeps only the link itself (session and accounts). EB_KEY, the app's private key, is a secret; EB_APP its id.
-// POST /bank/start    -> { url }                      (token) the page where Rabo asks for consent; then back to the app
-// POST /bank/finish   { state, code } -> { until }    the app came back with these; no token, as it may open in Safari
-// GET  /bank?from=D   -> { until, accounts }          (token) per account: booked lines since day D, and its balances
+// The bank links (Enable Banking), one per bank in BANKS: unlike the rest, the server sees these transactions, on
+// their way to the phone; it keeps only the links (session, accounts). EB_KEY, the app's private key, is a secret.
+// POST /bank/start    { bank } -> { url }             (token) the page where the bank asks for consent; then back to the app
+// POST /bank/finish   { state, code } -> { bank, until }  the app came back with these; no token, as it may open in Safari
+// GET  /bank?from=D   -> { links, failed, accounts }  (token) per linked account: booked lines since day D, its balances
+//                                                     (links: [{ bank, until }]; failed: the banks that did not answer)
 //
 // Notifications (Web Push, see push.js) to the phones that turned them on. Four times a day (wrangler.jsonc) the
 // server looks for new Rabo lines itself; mornings it also warns before the link ends and while last month is open.
@@ -77,16 +78,24 @@ async function booked(env, uid, from, ip) {
   return txs;
 }
 
-// Remembers the highest line number per account that a phone or a check has seen, and returns the lines above the
-// one remembered before: the new ones. An account seen for the first time has none yet.
+// Enable Banking's name of a bank -> the name Kassa gives its accounts (bank.js, readLinked)
+const BANKS = { Rabobank: 'Rabo', Openbank: 'Openbank' };
+
+// The links that have a session: [{ bank, accounts: [{ uid, iban, holder }], until }]
+const links = async (db) => (await db.prepare('SELECT bank, accounts, until FROM links WHERE session IS NOT NULL').all()).results
+  .map((link) => ({ ...link, accounts: JSON.parse(link.accounts) }));
+
+// Remembers per account the references of the lines a phone or a check has seen, and returns the lines it had not
+// seen before, each with its bank: the new ones. An account seen for the first time has none yet.
 async function newLines(db, found) {
   const row = await db.prepare("SELECT value FROM config WHERE name = 'seen'").first();
   const seen = row ? JSON.parse(row.value) : {};
   const fresh = [];
-  for (const { iban, txs } of found) {
-    const numbered = txs.filter((line) => line.status === 'BOOK' && /^\d+$/.test(line.entry_reference));
-    if (iban in seen) fresh.push(...numbered.filter((line) => Number(line.entry_reference) > seen[iban]));
-    seen[iban] = Math.max(seen[iban] ?? 0, ...numbered.map((line) => Number(line.entry_reference)));
+  for (const { iban, bank: name, txs } of found) {
+    const lines = txs.filter((line) => line.status === 'BOOK' && line.entry_reference);
+    const known = Array.isArray(seen[iban]) ? new Set(seen[iban]) : null; // null: first sight (or the old form, a number)
+    if (known) fresh.push(...lines.filter((line) => !known.has(line.entry_reference)).map((line) => ({ ...line, bank: name })));
+    seen[iban] = [...new Set([...(known ?? []), ...lines.map((line) => line.entry_reference)])].slice(-400);
   }
   await db.prepare("INSERT OR REPLACE INTO config (name, value) VALUES ('seen', ?)").bind(JSON.stringify(seen)).run();
   return fresh;
@@ -102,7 +111,9 @@ const monthName = (lang, month) => {
 };
 const lineText = (lang, line) => {
   const debit = line.credit_debit_indicator === 'DBIT';
-  const name = String((debit ? line.creditor : line.debtor)?.name || (line.remittance_information ?? []).join(' ') || '?').replace(/\s+/g, ' ').trim().slice(0, 40);
+  const words = (line.remittance_information ?? []).join(' ').replace(/\s+/g, ' ').trim();
+  const transfer = /^(?:ONMIDDELLIJKE )?OVERBOEKING (?:VAN|TEN GUNSTE VAN) (.+?)(?:,? REFERENTIE.*)?$/.exec(words); // Openbank names no party
+  const name = String((debit ? line.creditor : line.debtor)?.name || transfer?.[1] || words || '?').slice(0, 40);
   return `${name} ${debit ? '−' : '+'} ${euro(lang, Math.round(Number(line.transaction_amount.amount) * 100))}`;
 };
 
@@ -135,30 +146,34 @@ async function pingOthers(env, me, now) {
   for (const id of ids) await env.DB.prepare('UPDATE phones SET pinged = ? WHERE id = ?').bind(now, id).run();
 }
 
-// Four times a day: new Rabo lines. In the morning round also the end of the link and a month that is still open.
+// Four times a day: new bank lines. In the morning round also links about to end and a month that is still open.
 async function check(env, now) {
-  const link = await env.DB.prepare('SELECT accounts, until FROM bank WHERE id = 1 AND session IS NOT NULL').first();
-  if (link) {
+  const linked = await links(env.DB);
+  const from = new Date(now - 5 * DAY).toISOString().slice(0, 10);
+  const found = [];
+  for (const link of linked) {
     try {
-      const from = new Date(now - 5 * DAY).toISOString().slice(0, 10);
-      const found = [];
       // no ip: nobody is there, so these count against the few fetches a day the bank allows
-      for (const { uid, iban } of JSON.parse(link.accounts)) found.push({ iban, txs: await booked(env, uid, from) });
-      const fresh = await newLines(env.DB, found);
-      if (fresh.length) {
-        await notify(env, (lang) => ({
-          title: fresh.length === 1 ? T(lang, 'Nieuw bij Rabo', 'New at Rabo') : T(lang, `${fresh.length} nieuwe transacties bij Rabo`, `${fresh.length} new transactions at Rabo`),
-          body: [...fresh.slice(0, 4).map((line) => lineText(lang, line)), ...(fresh.length > 4 ? [T(lang, `en ${fresh.length - 4} meer`, `and ${fresh.length - 4} more`)] : [])].join('\n'),
-        }));
-      }
+      for (const { uid, iban } of link.accounts) found.push({ iban, bank: BANKS[link.bank], txs: await booked(env, uid, from) });
     } catch (error) {
-      console.log(`rabo check failed: ${error.message}`); // the bank said no (too often today?); the next round tries again
+      console.log(`${link.bank} check failed: ${error.message}`); // the bank said no (too often today?); the next round tries again
     }
   }
+  const fresh = await newLines(env.DB, found);
+  if (fresh.length) {
+    const banks = [...new Set(fresh.map((line) => line.bank))];
+    await notify(env, (lang) => ({
+      title: fresh.length === 1 ? T(lang, `Nieuw bij ${banks[0]}`, `New at ${banks[0]}`)
+        : banks.length === 1 ? T(lang, `${fresh.length} nieuwe transacties bij ${banks[0]}`, `${fresh.length} new transactions at ${banks[0]}`)
+          : T(lang, `${fresh.length} nieuwe banktransacties`, `${fresh.length} new bank transactions`),
+      body: [...fresh.slice(0, 4).map((line) => lineText(lang, line)), ...(fresh.length > 4 ? [T(lang, `en ${fresh.length - 4} meer`, `and ${fresh.length - 4} more`)] : [])].join('\n'),
+    }));
+  }
   if (new Date(now).getUTCHours() !== 7) return;
-  const left = link && Math.round((Date.parse(link.until) - now) / DAY);
-  if (left === 14 || left === 3) {
-    await notify(env, (lang) => ({ title: T(lang, 'Rabo-koppeling loopt af', 'Rabo link ending'),
+  for (const link of linked) {
+    const left = Math.round((Date.parse(link.until) - now) / DAY);
+    if (left !== 14 && left !== 3) continue;
+    await notify(env, (lang) => ({ title: T(lang, `${BANKS[link.bank]}-koppeling loopt af`, `${BANKS[link.bank]} link ending`),
       body: T(lang, `Over ${left} dagen. Koppel opnieuw in Kassa, bij Instellingen.`, `In ${left} days. Link again in Kassa, in Settings.`) }));
   }
   const day = new Date(now).getUTCDate();
@@ -200,13 +215,14 @@ async function handle(request, env, ctx) {
     return row ? json(row) : fail(404);
   }
   if (url.pathname === '/bank/finish' && request.method === 'POST') {
-    const row = await db.prepare('SELECT state, asked FROM bank WHERE id = 1').first();
-    if (!row?.state || body.state !== row.state || now - row.asked > HOUR || !isText(body.code, 200)) return fail(403);
+    const row = isText(body.state, 64) && await db.prepare('SELECT bank, asked FROM links WHERE state = ?').bind(body.state).first();
+    if (!row || now - row.asked > HOUR || !isText(body.code, 200)) return fail(403);
     const made = await bank(env, 'POST', '/sessions', { body: { code: body.code } });
-    const accounts = made.accounts.filter((account) => account.account_id?.iban).map((account) => ({ uid: account.uid, iban: account.account_id.iban }));
-    await db.prepare('UPDATE bank SET session = ?, accounts = ?, until = ?, state = NULL WHERE id = 1')
-      .bind(made.session_id, JSON.stringify(accounts), made.access.valid_until).run();
-    return json({ until: made.access.valid_until });
+    const accounts = made.accounts.filter((account) => account.account_id?.iban)
+      .map((account) => ({ uid: account.uid, iban: account.account_id.iban, holder: account.name ?? '' })); // Openbank names no party: own transfers go by the holder
+    await db.prepare('UPDATE links SET session = ?, accounts = ?, until = ?, state = NULL WHERE bank = ?')
+      .bind(made.session_id, JSON.stringify(accounts), made.access.valid_until, row.bank).run();
+    return json({ bank: BANKS[row.bank], until: made.access.valid_until });
   }
   if (route === 'GET /invite/:id') {
     const row = await db.prepare('SELECT wrapped FROM invites WHERE id = ? AND until > ?').bind(id, now).first();
@@ -273,29 +289,42 @@ async function handle(request, env, ctx) {
     return fail(204);
   }
   if (url.pathname === '/bank/start' && request.method === 'POST') {
+    if (!Object.hasOwn(BANKS, body.bank)) return fail(400);
     const state = crypto.randomUUID();
     const { url: consent } = await bank(env, 'POST', '/auth', { body: {
-      access: { valid_until: new Date(now + 179 * DAY).toISOString() }, // Rabo allows 180 days
-      aspsp: { name: 'Rabobank', country: 'NL' }, state, redirect_url: `${env.ORIGIN}/ah-saldo/`, psu_type: 'personal',
+      access: { valid_until: new Date(now + 179 * DAY).toISOString() }, // both banks allow 180 days
+      aspsp: { name: body.bank, country: 'NL' }, state, redirect_url: `${env.ORIGIN}/ah-saldo/`, psu_type: 'personal',
     } });
-    await db.prepare('INSERT INTO bank (id, state, asked) VALUES (1, ?, ?) ON CONFLICT (id) DO UPDATE SET state = excluded.state, asked = excluded.asked')
-      .bind(state, now).run();
+    await db.prepare('INSERT INTO links (bank, state, asked) VALUES (?, ?, ?) ON CONFLICT (bank) DO UPDATE SET state = excluded.state, asked = excluded.asked')
+      .bind(body.bank, state, now).run();
     return json({ url: consent });
   }
   if (route === 'GET /bank') {
-    const row = await db.prepare('SELECT accounts, until FROM bank WHERE id = 1 AND session IS NOT NULL').first();
+    const linked = await links(db);
     const from = url.searchParams.get('from') ?? '';
-    if (!row) return fail(404);
+    if (!linked.length) return fail(404);
     if (from && !/^\d{4}-\d{2}-\d{2}$/.test(from)) return fail(400);
     const ip = request.headers.get('CF-Connecting-IP');
     const accounts = [];
-    for (const { uid, iban } of JSON.parse(row.accounts)) {
-      const txs = await booked(env, uid, from, ip);
-      const { balances } = await bank(env, 'GET', `/accounts/${uid}/balances`, { ip });
-      accounts.push({ iban, txs, balances });
+    const failed = [];
+    for (const link of linked) {
+      try {
+        const got = [];
+        for (const { uid, iban, holder } of link.accounts) {
+          const txs = await booked(env, uid, from, ip);
+          const { balances } = await bank(env, 'GET', `/accounts/${uid}/balances`, { ip });
+          got.push({ iban, bank: BANKS[link.bank], holder, txs, balances });
+        }
+        accounts.push(...got); // a bank's accounts come whole or not at all
+      } catch {
+        failed.push(BANKS[link.bank]); // one bank not answering does not keep the other's lines away
+      }
     }
     await newLines(db, accounts); // the phone has these now: the next check does not announce them
-    return json({ until: row.until, accounts });
+    return json({
+      links: linked.map((link) => ({ bank: BANKS[link.bank], until: link.until })), failed, accounts,
+      until: linked.map((link) => link.until).sort()[0], // for a phone that has not updated Kassa yet
+    });
   }
   if (route === 'DELETE /invite') {
     await db.prepare('DELETE FROM invites').run();

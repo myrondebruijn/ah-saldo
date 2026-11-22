@@ -6,7 +6,7 @@ import {
 import {
   AH, START_CATS, US, addBalance, addFile, addStarter, balanceOn, byParty, cardsOn, catchUp, decodeText, dueOn, emptyBank, figures, fixedCosts,
   fixedSuggestions, forWhom, giftGuesses, giftsBought, giftsToFill, hasGap, heldShops, inCategory, monthOf, parseBank, payFrom, readCsv,
-  readLinked, readOpenbank, ruleKey, shiftMonth, sorter,
+  addLinked, readLinked, readOpenbank, ruleKey, shiftMonth, sorter,
 } from './bank.js';
 import {
   api, b64u, fromB64u, inviteId, isCode, makePasskey, merge, openData, rand, sealData, tokenOf, unwrap, usePasskey, wrap,
@@ -304,86 +304,90 @@ async function invite() {
   }
 }
 
-// ---------- the Rabo link ----------
-// With sharing on, the Kassa server can fetch the new lines of the linked Rabo account itself (see worker/index.js).
-// Kassa asks for them when it opens and while it is on screen, at most once an hour per phone. Linking goes through
-// Rabo's own consent page, which sends the person back to Kassa's address with a one-time code.
+// ---------- bank links ----------
+// With sharing on, the Kassa server can fetch the new lines of the linked Rabo and Openbank accounts itself (see
+// worker/index.js). Kassa asks for them when it opens and while it is on screen, at most once an hour per phone. Linking
+// goes through the bank's own consent page, which sends the person back to Kassa's address with a one-time code.
 
-const RABO_KEY = `${KEY}-rabo`; // on this phone: { until: when the link ends, at: the last try, ok: the last fetch, failed }
+const LINKS_KEY = `${KEY}-links`; // on this phone: { banks: { Rabo: until, ... }, at: the last try, ok: the last fetch, failed: banks }
+const LINKABLE = { Rabo: 'Rabobank', Openbank: 'Openbank' }; // Kassa's name of a bank -> Enable Banking's
 const HOUR = 60 * 60 * 1000;
-let rabo = readRabo();
+let links = readLinks();
+localStorage.removeItem(`${KEY}-rabo`); // what the first version, for Rabo alone, kept; the next fetch fills the new one
 
-function readRabo() {
+function readLinks() {
   try {
-    return JSON.parse(localStorage.getItem(RABO_KEY)) ?? {};
+    return { banks: {}, failed: [], ...JSON.parse(localStorage.getItem(LINKS_KEY)) };
   } catch {
-    return {};
+    return { banks: {}, failed: [] };
   }
 }
-const keepRabo = () => localStorage.setItem(RABO_KEY, JSON.stringify(rabo));
+const keepLinks = () => localStorage.setItem(LINKS_KEY, JSON.stringify(links));
 
 // `asked`: the Fetch now button, which does not wait for the hour and says how it went
-async function fetchRabo(asked = false) {
-  if (!sharing || (!asked && Date.now() - (rabo.at ?? 0) < HOUR)) return;
-  rabo.at = Date.now(); // a failed try waits an hour too
-  keepRabo();
-  if (asked) toast(L('Ophalen bij Rabo…', 'Fetching from Rabo…'));
-  // from a week before the newest last line (the linked account's: it is fetched most), as the link may date a line a day
-  // earlier than the CSV and what is there already is not added again; Rabo gives at most 90 days. hasGap tells of a hole.
-  const last = bank.accounts.filter((account) => account.bank === 'Rabo' && !account.card && account.through).map((account) => account.through).sort().at(-1);
+async function fetchBank(asked = false) {
+  if (!sharing || (!asked && Date.now() - (links.at ?? 0) < HOUR)) return;
+  links.at = Date.now(); // a failed try waits an hour too
+  keepLinks();
+  if (asked) toast(L('Ophalen bij de bank…', 'Fetching from the bank…'));
+  // from a week before the newest last line of an account (a linked one: those are fetched most), as the link may date a
+  // line a day earlier than the bank's file and what is there already is not added again; Rabo gives at most 90 days.
+  const last = bank.accounts.filter((account) => !account.card && !account.shop && account.through).map((account) => account.through).sort().at(-1);
   const from = last ? isoDate(new Date(Math.max(Date.parse(last) - 7 * 24 * HOUR, Date.now() - 89 * 24 * HOUR))) : '';
   try {
     const got = await api('GET', `/bank${from && `?from=${from}`}`, { token: await tokenOf(household) });
     const file = readLinked(got.accounts);
     if (busy()) {
-      rabo.at = 0; // adding now would undo what is being entered: the next round tries again
+      links.at = 0; // adding now would undo what is being entered: the next round tries again
       return;
     }
-    const added = addFile(bank, file, new Date().toISOString());
-    Object.assign(rabo, { until: got.until, ok: Date.now(), failed: false });
+    const { added, skipped } = addLinked(bank, file, new Date().toISOString());
+    const failed = [...new Set([...got.failed, ...file.accounts.filter((account) => skipped.includes(account.id)).map((account) => account.bank)])];
+    links = { ...links, banks: Object.fromEntries(got.links.map((link) => [link.bank, link.until])), ok: Date.now(), failed };
     catchUp(bank, isoDate());
     saveBank();
-    if (added || asked) {
-      toast(added ? L(`${plural(added, 'nieuwe transactie', 'nieuwe transacties')} van Rabo.`, `${plural(added, 'new transaction', 'new transactions')} from Rabo.`)
-        : L('Niets nieuws van Rabo.', 'Nothing new from Rabo.'));
-    }
+    const news = added ? L(`${plural(added, 'nieuwe banktransactie', 'nieuwe banktransacties')}.`, `${plural(added, 'new bank transaction', 'new bank transactions')}.`)
+      : asked ? L('Niets nieuws van de bank.', 'Nothing new from the bank.') : '';
+    const trouble = asked && failed.length ? L(`Ophalen bij ${failed.join(' en ')} lukte niet; probeer het later opnieuw.`, `Fetching from ${failed.join(' and ')} failed; try again later.`) : '';
+    if (news || trouble) toast([news, trouble].filter(Boolean).join(' '));
   } catch (error) {
-    if (error.status === 404) rabo = { at: rabo.at }; // nothing is linked
-    else rabo.failed = true;
+    if (error.status === 404) links = { banks: {}, failed: [], at: links.at }; // nothing is linked
+    else links.failed = Object.keys(links.banks);
     if (asked) {
       render();
-      if (error.status === 404) toast(L('Rabo is niet gekoppeld.', 'Rabo has not been linked.'));
+      if (error.status === 404) toast(L('Er is geen bank gekoppeld.', 'No bank has been linked.'));
       else shareError(error);
     }
   } finally {
-    keepRabo();
+    keepLinks();
   }
 }
 
-async function linkRabo() {
+async function linkBank(name) {
   try {
-    const { url } = await api('POST', '/bank/start', { token: await tokenOf(household), body: {} });
+    const { url } = await api('POST', '/bank/start', { token: await tokenOf(household), body: { bank: LINKABLE[name] } });
     location.href = url;
   } catch (error) {
     shareError(error);
   }
 }
 
-// Back from Rabo: `code` when consent was given. This may open in Safari instead of the Home Screen app; the
+// Back from the bank: `code` when consent was given. This may open in Safari instead of the Home Screen app; the
 // server keeps the link, so it works from either.
-async function backFromRabo(params) {
+async function backFromBank(params) {
   history.replaceState(null, '', location.pathname + location.hash); // the code works once: a reload must not send it again
   if (!params.get('code')) {
-    toast(L('Rabo is niet gekoppeld.', 'Rabo has not been linked.'));
+    toast(L('De bank is niet gekoppeld.', 'The bank has not been linked.'));
     return;
   }
   try {
-    const { until } = await api('POST', '/bank/finish', { body: { state: params.get('state'), code: params.get('code') } });
-    rabo = { until };
-    keepRabo();
+    const { bank: name, until } = await api('POST', '/bank/finish', { body: { state: params.get('state'), code: params.get('code') } });
+    links.banks[name] = until;
+    links.at = 0;
+    keepLinks();
     render();
-    toast(sharing ? L('Rabo is gekoppeld.', 'Rabo is linked.') : L('Rabo is gekoppeld. Ga terug naar Kassa op je beginscherm.', 'Rabo is linked. Go back to Kassa on your Home Screen.'));
-    fetchRabo();
+    toast(sharing ? L(`${name} is gekoppeld.`, `${name} is linked.`) : L(`${name} is gekoppeld. Ga terug naar Kassa op je beginscherm.`, `${name} is linked. Go back to Kassa on your Home Screen.`));
+    fetchBank();
   } catch (error) {
     if (error.status === 403) toast(L('Deze koppeling is verlopen of al gebruikt. Koppel opnieuw in Instellingen.', 'This link has expired or was used already. Link again in Settings.'));
     else shareError(error);
@@ -566,8 +570,8 @@ const paidWith = (cards, total) => `
 // Overview asks once per phone. The answer must be a tap of its own: only straight from one does iOS ask for permission.
 const pushNotice = () => (pushKey && standalone && Notification.permission !== 'denied' && !localStorage.getItem(PUSH_KEY) && !localStorage.getItem(PUSH_LATER) ? `
   <div class="group">
-    <p class="row"><span class="row-main">${L('Meldingen aanzetten? Dan hoor je het bij nieuwe Rabo-transacties, als een maand is afgesloten en als er nog bestanden ontbreken.',
-      'Turn on notifications? You then hear about new Rabo transactions, a closed month and files that are still missing.')}</span></p>
+    <p class="row"><span class="row-main">${L('Meldingen aanzetten? Dan hoor je het bij nieuwe banktransacties, als een maand is afgesloten en als er nog bestanden ontbreken.',
+      'Turn on notifications? You then hear about new bank transactions, a closed month and files that are still missing.')}</span></p>
     <button class="row tint" data-action="pushOn">${L('Meldingen aanzetten', 'Turn notifications on')}</button>
     <button class="row tint" data-action="pushLater">${L('Niet nu', 'Not now')}</button>
   </div>` : '');
@@ -888,11 +892,11 @@ function overviewScreen() {
             `The last upload is ${oldest} days old. Time for new files.`)}</span></p>
           ${uploadRow()}
         </div>` : ''}
-      ${sharing && rabo.until && daysLeft(rabo.until.slice(0, 10), today) <= 14 ? `
-        <div class="group"><a class="row notice" href="#/meer">${icon('warn')}<span class="row-main">${daysLeft(rabo.until.slice(0, 10), today) < 0
-          ? L('De Rabo-koppeling is verlopen. Koppel opnieuw in Instellingen.', 'The Rabo link has ended. Link again in Settings.')
-          : L(`De Rabo-koppeling loopt af op ${dayShort(rabo.until.slice(0, 10))}. Koppel opnieuw in Instellingen.`,
-            `The Rabo link ends on ${dayShort(rabo.until.slice(0, 10))}. Link again in Settings.`)}</span>${icon('next')}</a></div>` : ''}
+      ${sharing ? Object.entries(links.banks).filter(([, until]) => daysLeft(until.slice(0, 10), today) <= 14).map(([name, until]) => `
+        <div class="group"><a class="row notice" href="#/meer">${icon('warn')}<span class="row-main">${daysLeft(until.slice(0, 10), today) < 0
+          ? L(`De ${name}-koppeling is verlopen. Koppel opnieuw in Instellingen.`, `The ${name} link has ended. Link again in Settings.`)
+          : L(`De ${name}-koppeling loopt af op ${dayShort(until.slice(0, 10))}. Koppel opnieuw in Instellingen.`,
+            `The ${name} link ends on ${dayShort(until.slice(0, 10))}. Link again in Settings.`)}</span>${icon('next')}</a></div>`).join('') : ''}
       ${gaps.length ? `
         <div class="group"><p class="row notice">${icon('warn')}<span class="row-main">${L('Er ontbreken transacties bij', 'Transactions are missing for')}
           ${gaps.map((account) => esc(account.name)).join(', ')}. ${L('Upload ook de periode ertussen.', 'Upload the period in between as well.')}</span></p></div>` : ''}
@@ -1268,21 +1272,22 @@ function shareSection() {
 }
 
 // Only with sharing on: the server lets in only phones of the household.
-function raboSection() {
+function bankSection() {
   if (!sharing) return '';
-  const until = rabo.until ? formatDate(rabo.until) : '';
-  const time = rabo.ok ? `${formatDate(rabo.ok)}, ${new Date(rabo.ok).toLocaleTimeString(LOCALE, { hour: '2-digit', minute: '2-digit' })}` : '';
-  const status = !until ? L('Koppel je Rabo-betaalrekening: dan haalt Kassa nieuwe transacties zelf op als je de app opent. Elke 180 dagen keur je dat opnieuw goed in de Rabo-app.',
-    'Link your Rabo current account: Kassa then fetches new transactions itself when you open the app. Every 180 days you approve that again in the Rabo app.')
-    : `${L(`Gekoppeld tot ${until}.`, `Linked until ${until}.`)} ${rabo.failed ? L('Ophalen lukte de laatste keer niet.', 'Fetching failed the last time.')
-      : time ? L(`Laatst opgehaald ${time}.`, `Last fetched ${time}.`) : ''}`;
+  const time = links.ok ? `${formatDate(links.ok)}, ${new Date(links.ok).toLocaleTimeString(LOCALE, { hour: '2-digit', minute: '2-digit' })}` : '';
+  const linked = Object.entries(links.banks).map(([name, until]) => (links.failed.includes(name)
+    ? L(`${name} gekoppeld tot ${formatDate(until)}; ophalen lukte de laatste keer niet.`, `${name} linked until ${formatDate(until)}; fetching failed the last time.`)
+    : L(`${name} gekoppeld tot ${formatDate(until)}.`, `${name} linked until ${formatDate(until)}.`))).join(' ');
   return `
     <div class="group">
-      <button class="row tint" data-action="fetchRabo">${L('Nu ophalen bij Rabo', 'Fetch from Rabo now')}</button>
-      <button class="row tint" data-action="linkRabo">${until ? L('Rabo opnieuw koppelen', 'Link Rabo again') : L('Rabo koppelen', 'Link Rabo')}</button>
+      <button class="row tint" data-action="fetchBank">${L('Nu ophalen bij de bank', 'Fetch from the bank now')}</button>
+      ${Object.keys(LINKABLE).map((name) => `<button class="row tint" data-action="linkBank" data-id="${name}">${links.banks[name]
+        ? L(`${name} opnieuw koppelen`, `Link ${name} again`) : L(`${name} koppelen`, `Link ${name}`)}</button>`).join('')}
     </div>
-    <p class="group-note">${status} ${L('De transacties gaan via de Kassa-server en Enable Banking, die ze kunnen lezen.',
-      'The transactions pass through the Kassa server and Enable Banking, which can read them.')}</p>`;
+    <p class="group-note">${linked || L('Koppel je rekeningen: dan haalt Kassa nieuwe transacties zelf op als je de app opent.',
+      'Link your accounts: Kassa then fetches new transactions itself when you open the app.')} ${time ? L(`Laatst opgehaald ${time}.`, `Last fetched ${time}.`) : ''}
+      ${L('Elke 180 dagen keur je een koppeling opnieuw goed in de app van de bank. De transacties gaan via de Kassa-server en Enable Banking, die ze kunnen lezen.',
+        'Every 180 days you approve a link again in the bank\'s app. The transactions pass through the Kassa server and Enable Banking, which can read them.')}</p>`;
 }
 
 function pushSection() {
@@ -1294,11 +1299,11 @@ function pushSection() {
     ${can ? `<div class="group"><button class="row tint" data-action="${on ? 'pushOff' : 'pushOn'}">${on ? L('Meldingen uitzetten', 'Turn notifications off')
       : L('Meldingen aanzetten', 'Turn notifications on')}</button></div>` : ''}
     <p class="group-note">${can ? '' : L('Meldingen werken alleen in Kassa op je beginscherm. ', 'Notifications only work in Kassa on your Home Screen. ')}${L(
-      `Per telefoon: nieuwe Rabo-transacties (tot vier keer per dag), wijzigingen op de andere telefoon (hooguit één keer per uur),
-      een afgesloten maand met wat er uitging en binnenkwam, een herinnering zolang een maand nog bestanden mist, en het aflopen van de
-      Rabo-koppeling. Daarvoor gaan de maandtotalen en de namen van de rekeningen naar de Kassa-server.`,
-      `Per phone: new Rabo transactions (up to four times a day), changes on the other phone (at most once an hour), a closed month
-      with what went out and came in, a reminder while a month still misses files, and the end of the Rabo link. For this, the
+      `Per telefoon: nieuwe banktransacties (tot vier keer per dag), wijzigingen op de andere telefoon (hooguit één keer per uur),
+      een afgesloten maand met wat er uitging en binnenkwam, een herinnering zolang een maand nog bestanden mist, en het aflopen van een
+      bankkoppeling. Daarvoor gaan de maandtotalen en de namen van de rekeningen naar de Kassa-server.`,
+      `Per phone: new bank transactions (up to four times a day), changes on the other phone (at most once an hour), a closed month
+      with what went out and came in, a reminder while a month still misses files, and the end of a bank link. For this, the
       monthly totals and the account names go to the Kassa server.`)}</p>`;
 }
 
@@ -1315,7 +1320,7 @@ function settingsScreen() {
       <p class="group-note">${L(`Kies één of meer bestanden: het CSV-bestand van een Rabo-rekening of creditcard, of het PDF-afschrift van Openbank.
         Bestanden mogen elkaar overlappen: wat er al staat, komt er niet nog eens bij.`, `Choose one or more files: the CSV file of a Rabo account or
         credit card, or the PDF statement from Openbank. Files may overlap: what is already there is not added again.`)}</p>
-      ${raboSection()}
+      ${bankSection()}
       ${bank.accounts.length ? `
         <h2 class="section">${L('Rekeningen', 'Accounts')}</h2>
         <ul class="group">${accountRows()}</ul>
@@ -2224,8 +2229,8 @@ const actions = {
   share: startSharing,
   joinShare: joinSharing,
   invite,
-  linkRabo,
-  fetchRabo: () => fetchRabo(true),
+  linkBank: (card, button) => linkBank(button.dataset.id),
+  fetchBank: () => fetchBank(true),
   pushOn,
   pushOff,
   pushLater() {
@@ -2486,15 +2491,15 @@ if (catchUp(bank, isoDate()).length) saveBank();
 else render();
 sync();
 const back = new URLSearchParams(location.search);
-if (back.has('state')) backFromRabo(back);
-else fetchRabo();
+if (back.has('state')) backFromBank(back);
+else fetchBank();
 startPush();
 reportMonth();
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) return;
   if (catchUp(bank, isoDate()).length) saveBank();
   sync(); // what the other phone changed meanwhile
-  fetchRabo();
+  fetchBank();
 });
 addEventListener('online', () => sync());
-setInterval(() => document.hidden || (sync(), fetchRabo()), 10_000); // while Kassa is on screen: the other phone's changes show up within seconds
+setInterval(() => document.hidden || (sync(), fetchBank()), 10_000); // while Kassa is on screen: the other phone's changes show up within seconds
