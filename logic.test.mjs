@@ -27,6 +27,14 @@ test('balance is the sum of the entries', () => {
   assert.equal(logic.balance(spent), 1300);
 });
 
+test('addCards adds a card once and leaves the cards that are there alone', () => {
+  const state = { cards: [card()] };
+  const other = card({ id: 'card-2', number: '9876543210987654321' });
+  assert.equal(logic.addCards(state, [card({ id: 'again', entries: [entry('start', 9900)] }), other]), 1);
+  assert.deepEqual(state.cards.map((each) => [each.id, logic.balance(each)]), [['card-1', 2500], ['card-2', 2500]]);
+  assert.equal(logic.addCards(state, [other]), 0);
+});
+
 test('card number and code validation', () => {
   assert.equal(logic.cleanDigits('1234 5678-9012 3456 789'), '1234567890123456789');
   assert.equal(logic.groupNumber('1234567890123456789'), '1234 5678 9012 3456 789');

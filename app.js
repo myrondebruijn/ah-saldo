@@ -1,5 +1,5 @@
 import {
-  balance, cleanDigits, code128, daysLeft, expiryState, formatEuro as euroIn, groupNumber, isDate, isName, isoDate, isoWeek,
+  addCards, balance, cleanDigits, code128, daysLeft, expiryState, formatEuro as euroIn, groupNumber, isDate, isName, isoDate, isoWeek,
   needsInstall, parseEuro, parseState, periodStart, settle, shareOut, shiftPeriod, sortCards, summarize,
   validCode, validNumber,
 } from './logic.js';
@@ -1318,8 +1318,8 @@ async function pdfItems(bytes) {
   return items;
 }
 
-// Reads the chosen files: bank exports, and a starter file (categories and rules, and maybe bank files read already).
-// Each file is taken whole or not at all.
+// Reads the chosen files: bank exports, and a starter file (categories and rules, and maybe bank files read already
+// and gift cards to add). Each file is taken whole or not at all.
 async function importBankFiles() {
   // a starter file names accounts and sorts transactions that must be there first, so it is read after the bank files
   const files = [...$('bankFiles').files].sort((a, b) => a.name.endsWith('.json') - b.name.endsWith('.json'));
@@ -1331,6 +1331,7 @@ async function importBankFiles() {
   let added = 0;
   let changed = false;
   let starter = false;
+  let newCards = 0;
   for (const file of files) {
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
@@ -1338,9 +1339,12 @@ async function importBankFiles() {
       const text = isPdf ? '' : decodeText(bytes);
       if (isPdf) added += addFile(bank, readOpenbank(await pdfItems(bytes)), now);
       else if (text.trimStart().startsWith('{')) {
-        const fresh = addStarter(bank, JSON.parse(text), now);
+        const data = JSON.parse(text);
+        const cards = data.cards ? parseState(JSON.stringify({ cards: data.cards })).cards : []; // throws on a card that is not one
+        const fresh = addStarter(bank, data, now);
         if (fresh === null) throw new Error('unknown');
         added += fresh;
+        newCards += addCards(state, cards); // only cards the app does not have; the ones it has are never touched
         starter = true;
       } else added += addFile(bank, readCsv(text), now);
       changed = true;
@@ -1356,7 +1360,8 @@ async function importBankFiles() {
   const news = !changed ? '' : added ? L(`${plural(added, 'nieuwe transactie', 'nieuwe transacties')} toegevoegd.`, `${plural(added, 'new transaction', 'new transactions')} added.`)
     : starter ? L('Categorieën en regels toegevoegd.', 'Categories and rules added.')
     : L('Niets nieuws: alles stond er al in.', 'Nothing new: it was all there already.');
-  toast([news, failed.length ? `${L('Niet gelezen', 'Not read')}: ${failed.join(', ')}.` : ''].filter(Boolean).join(' '));
+  const cardNews = newCards ? L(`${plural(newCards, 'kaart', 'kaarten')} toegevoegd.`, `${plural(newCards, 'card', 'cards')} added.`) : '';
+  toast([news, cardNews, failed.length ? `${L('Niet gelezen', 'Not read')}: ${failed.join(', ')}.` : ''].filter(Boolean).join(' '));
 }
 
 // ---------- actions ----------

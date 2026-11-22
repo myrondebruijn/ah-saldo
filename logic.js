@@ -34,6 +34,14 @@ export function expiryState(expiry, today) {
   return days < 0 ? 'expired' : days <= 30 ? 'soon' : 'ok';
 }
 
+// Adds the cards that are not in the app yet, told by their number, and returns how many were new.
+// The cards must be valid already: pass them through parseState first.
+export function addCards(state, cards) {
+  const fresh = cards.filter((card) => !state.cards.some((own) => own.number === card.number));
+  state.cards.push(...fresh);
+  return fresh.length;
+}
+
 // soonest expiry first, cards without a date last, then lowest balance first
 export const sortCards = (cards) => [...cards].sort((a, b) =>
   (a.expiry || '9999').localeCompare(b.expiry || '9999') || balance(a) - balance(b));
