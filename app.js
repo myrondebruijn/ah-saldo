@@ -1320,7 +1320,8 @@ async function pdfItems(bytes) {
 
 // Reads the chosen files: bank exports, and the starter file with categories and rules. Each file is taken whole or not at all.
 async function importBankFiles() {
-  const files = [...$('bankFiles').files];
+  // a starter file names accounts and sorts transactions that must be there first, so it is read after the bank files
+  const files = [...$('bankFiles').files].sort((a, b) => a.name.endsWith('.json') - b.name.endsWith('.json'));
   $('bankFiles').value = '';
   if (!files.length) return;
   toast(L('Bestanden lezen…', 'Reading files…'));
