@@ -412,7 +412,8 @@ export function giftGuesses(bank, paid) {
   for (const tx of [...bank.txs].sort(byDate)) {
     if (!tx.gift) continue;
     const rate = -tx.cents / tx.gift.value;
-    const usual = rate > 0.5 && rate <= 1 ? rate : rates.get(tx.gift.shop) ?? 1; // a card paid with points says nothing about the price
+    // more than a quarter off is no discount: part was paid some other way (points, another card), so it says nothing about the price
+    const usual = rate >= 0.75 && rate <= 1 ? rate : rates.get(tx.gift.shop) ?? 1;
     rates.delete(tx.gift.shop);
     rates.set(tx.gift.shop, usual);
   }

@@ -263,12 +263,13 @@ test('gift cards: the app guesses the shop and the value from what was paid befo
     wissel('2026-07-02', -4750, 'Boekenbon', 5000), // 5% off then
     wissel('2026-07-09', -4700, 'Boekenbon', 5000), // 6% off now
     wissel('2026-07-10', -25, 'Speelgoedbon', 2500), // paid with points: its price says nothing
+    wissel('2026-07-12', -875, 'Boekenbon', 1500), // partly paid some other way: the 6% stays the shop's discount
   );
   assert.deepEqual(bank.giftGuesses(data, 4433)[0], { shop: 'Albert Heijn', value: 4500 });
   assert.deepEqual(bank.giftGuesses(data, 14100)[0], { shop: 'Boekenbon', value: 15000 });
   assert.deepEqual(bank.giftGuesses(data, 950).find((guess) => guess.shop === 'Boekenbon'), { shop: 'Boekenbon', value: 1000 }); // 5% again: still a round value
   assert.deepEqual(bank.giftGuesses(data, 6888).find((guess) => guess.shop === 'Boekenbon'), { shop: 'Boekenbon', value: 7330 }); // no round value near: to the nearest five cents
-  assert.deepEqual(bank.giftGuesses(data, 1234).map((guess) => guess.shop), ['Speelgoedbon', 'Boekenbon', 'Albert Heijn']); // no shop fits: the one bought last first
+  assert.deepEqual(bank.giftGuesses(data, 1234).map((guess) => guess.shop), ['Boekenbon', 'Speelgoedbon', 'Albert Heijn']); // no shop fits: the one bought last first
   assert.deepEqual(bank.giftGuesses(bank.emptyBank(), 4433), []);
 });
 
