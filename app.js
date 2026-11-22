@@ -100,7 +100,7 @@ function saveBank() {
 // ---------- sharing ----------
 // With sharing on, the cards and bank data are also on the Kassa server, locked (see sync.js), and every phone
 // keeps its own full copy, as a shop may have no signal. Changes go up a moment after they are saved; the other
-// phone fetches them when Kassa opens or comes back to the front.
+// phone fetches them when Kassa opens or comes back to the front, and every ten seconds while it is on screen.
 
 const SHARE_KEY = `${KEY}-sync`; // { key: the household key, cred: this phone's passkey, version: of the data last synced }
 const BASE_KEY = `${KEY}-sync-base`; // the data as it was after the last sync: what changed on both sides since is joined
@@ -108,7 +108,6 @@ let sharing = readSharing();
 let household = sharing && fromB64u(sharing.key);
 let syncing = false;
 let syncAgain = false;
-let syncedAt = null;
 let syncError = null;
 let syncTimer;
 
@@ -138,6 +137,10 @@ function takeData(data) {
   localStorage.setItem(BANK_KEY, JSON.stringify(bank));
 }
 
+// A sheet is open or a field has the keyboard: replacing the data now would undo what is being entered.
+const busy = () => Boolean(document.querySelector('dialog[open]'))
+  || (app.contains(document.activeElement) && document.activeElement.matches('input, select, textarea'));
+
 function syncSoon() {
   if (!sharing) return;
   clearTimeout(syncTimer);
@@ -155,11 +158,12 @@ async function sync(tries = 3) {
   syncing = true;
   syncAgain = false;
   let changed = false;
+  const failed = Boolean(syncError);
   try {
     const token = await tokenOf(household);
     const remote = await api('GET', `/vault?have=${sharing.version}`, { token });
     if (remote) {
-      if (document.querySelector('dialog[open]')) return; // a sheet may be changing what would be replaced: its save syncs again
+      if (busy()) return; // the next round tries again
       const theirs = canonical(JSON.parse(await openData(household, remote.data)));
       const mine = snapshot();
       const base = localStorage.getItem(BASE_KEY);
@@ -180,14 +184,14 @@ async function sync(tries = 3) {
         keepSharing(now);
       } else syncAgain = true;
     }
-    syncedAt = new Date();
     syncError = null;
   } catch (error) {
     syncError = error;
   } finally {
     syncing = false;
   }
-  if (changed || route() === 'meer') render(); // the settings screen shows how the last sync went
+  // the settings screen says whether the server is reachable; redrawing it every round would close its date picker
+  if (changed || (route() === 'meer' && failed !== Boolean(syncError))) render();
   if (syncAgain && tries > 1) await sync(tries - 1);
 }
 
@@ -196,7 +200,6 @@ function link(key, cred, version) {
   household = key;
   sharing = { key: b64u(key), cred, version };
   keepSharing(snapshot());
-  syncedAt = new Date();
   syncError = null;
   render();
 }
@@ -1062,8 +1065,6 @@ function transactionsScreen() {
 
 // ---------- settings ----------
 
-const clock = (date) => date.toLocaleTimeString(LOCALE, { hour: '2-digit', minute: '2-digit' });
-
 function shareSection() {
   if (!sharing) {
     return `
@@ -1079,14 +1080,14 @@ function shareSection() {
     : syncError?.status === 401 ? L('Deze telefoon wordt niet meer toegelaten.', 'This phone is no longer let in.')
       : syncError ? L('Nog niet bijgewerkt: geen verbinding met de Kassa-server. Wat je wijzigt, gaat mee zodra die er is.',
         'Not updated yet: no connection with the Kassa server. What you change goes along as soon as there is one.')
-        : syncedAt ? L(`Bijgewerkt om ${clock(syncedAt)}.`, `Updated at ${clock(syncedAt)}.`) : '';
+        : L('Alles is bijgewerkt.', 'Everything is up to date.');
   return `
     <h2 class="section">${L('Samen delen', 'Sharing')}</h2>
     <div class="group">
       <button class="row tint" data-action="invite">${L('Iemand uitnodigen', 'Invite someone')}</button>
       <button class="row tint" data-action="syncNow">${L('Nu bijwerken', 'Update now')}</button>
     </div>
-    <p class="group-note" aria-live="polite">${status} ${L('Wat de ander wijzigt, zie je zodra je Kassa opent.', 'You see what the other phone changes as soon as you open Kassa.')}</p>`;
+    <p class="group-note" aria-live="polite">${status} ${L('Zolang Kassa open is, zie je binnen tien seconden wat de ander wijzigt.', 'While Kassa is open, you see what the other phone changes within ten seconds.')}</p>`;
 }
 
 function settingsScreen() {
@@ -2011,6 +2012,7 @@ const actions = {
   invite,
   async syncNow() {
     await sync();
+    render();
     if (syncError) toast(L('De Kassa-server is niet bereikbaar.', 'The Kassa server cannot be reached.'));
   },
   language() {
@@ -2267,3 +2269,4 @@ document.addEventListener('visibilitychange', () => {
   sync(); // what the other phone changed meanwhile
 });
 addEventListener('online', () => sync());
+setInterval(() => document.hidden || sync(), 10_000); // while Kassa is on screen: the other phone's changes show up within seconds
