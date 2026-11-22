@@ -4,3 +4,6 @@ PRODUCT.md
 DESIGN.md
 .impeccable/
 .playwright-mcp/
+
+# Wrangler's local state (the test database)
+worker/.wrangler/

@@ -1,0 +1,8 @@
+// The Kassa server (see index.js). Deploy from this folder with: npx wrangler deploy
+{
+  "name": "kassa-sync",
+  "main": "index.js",
+  "compatibility_date": "2026-11-01",
+  "vars": { "ORIGIN": "https://myrondebruijn.github.io" },
+  "d1_databases": [{ "binding": "DB", "database_name": "kassa", "database_id": "7acc4928-6409-4ca4-9db6-e89f9c83e439" }]
+}

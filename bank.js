@@ -436,7 +436,7 @@ export function giftGuesses(bank, paid) {
 // what the shop said was left at the end of the day `through`. What is paid from it are transactions of that
 // account, entered by hand or booked every month: account.monthly = [{ name, cents, day, next: 'YYYY-MM' }].
 
-const paid = (account, date, cents, name) => ({ id: `${account.id}.${crypto.randomUUID().slice(0, 8)}`, acc: account.id, date, cents, name, text: '' });
+const paid = (account, date, cents, name, id = crypto.randomUUID().slice(0, 8)) => ({ id: `${account.id}.${id}`, acc: account.id, date, cents, name, text: '' });
 
 // Starts keeping a shop's balance and returns its account, or undefined when the shop has one already.
 export function addBalance(bank, { shop, balance, through, monthly = [] }, now) {
@@ -447,9 +447,9 @@ export function addBalance(bank, { shop, balance, through, monthly = [] }, now) 
   return account;
 }
 
-// Books a payment from a shop's balance and returns it.
-export function payFrom(bank, account, date, cents, name) {
-  const tx = paid(account, date, cents, name);
+// Books a payment from a shop's balance and returns it. `id` names it; a payment entered by hand gets a random one.
+export function payFrom(bank, account, date, cents, name, id) {
+  const tx = paid(account, date, cents, name, id);
   bank.txs.push(tx);
   return tx;
 }
@@ -460,13 +460,16 @@ export function dueOn({ day, next }) {
   return `${next}-${String(Math.min(day, days)).padStart(2, '0')}`;
 }
 
+// Two shared phones that both book the same month give it the same id, so joining their changes keeps one.
+const monthlyId = (each) => `${dueOn(each)}.${each.name.replace(/[^\w-]/g, '').slice(0, 40)}`;
+
 // Books what the balances pay every month, up to `today`, and returns the new transactions. Each month is
 // booked once: a payment that is removed afterwards stays away.
 export function catchUp(bank, today) {
   const booked = [];
   for (const account of bank.accounts) {
     for (const each of account.monthly ?? []) {
-      for (; dueOn(each) <= today; each.next = shiftMonth(each.next, 1)) booked.push(payFrom(bank, account, dueOn(each), each.cents, each.name));
+      for (; dueOn(each) <= today; each.next = shiftMonth(each.next, 1)) booked.push(payFrom(bank, account, dueOn(each), each.cents, each.name, monthlyId(each)));
     }
   }
   return booked;

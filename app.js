@@ -8,6 +8,9 @@ import {
   fixedSuggestions, forWhom, giftGuesses, giftsBought, giftsToFill, hasGap, heldShops, inCategory, monthOf, parseBank, payFrom, readCsv,
   readOpenbank, ruleKey, shiftMonth, sorter,
 } from './bank.js';
+import {
+  api, b64u, fromB64u, inviteId, isCode, makePasskey, merge, openData, rand, sealData, tokenOf, unwrap, usePasskey, wrap,
+} from './sync.js';
 
 const KEY = 'ah-saldo'; // the app's first name; changing this key would hide everything already saved
 const BANK_KEY = `${KEY}-bank`; // apart from the cards, so nothing in the bank data can ever make the cards unreadable
@@ -68,6 +71,7 @@ function save() {
     toast(L('Opslaan is mislukt. Maak nu een back-up.', 'Saving failed. Make a backup now.'));
   }
   render();
+  syncSoon();
 }
 
 function loadBank() {
@@ -90,6 +94,208 @@ function saveBank() {
     toast(L('Opslaan is mislukt: de opslag van de telefoon is vol.', 'Saving failed: the storage of the phone is full.'));
   }
   render();
+  syncSoon();
+}
+
+// ---------- sharing ----------
+// With sharing on, the cards and bank data are also on the Kassa server, locked (see sync.js), and every phone
+// keeps its own full copy, as a shop may have no signal. Changes go up a moment after they are saved; the other
+// phone fetches them when Kassa opens or comes back to the front.
+
+const SHARE_KEY = `${KEY}-sync`; // { key: the household key, cred: this phone's passkey, version: of the data last synced }
+const BASE_KEY = `${KEY}-sync-base`; // the data as it was after the last sync: what changed on both sides since is joined
+let sharing = readSharing();
+let household = sharing && fromB64u(sharing.key);
+let syncing = false;
+let syncAgain = false;
+let syncedAt = null;
+let syncError = null;
+let syncTimer;
+
+function readSharing() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SHARE_KEY));
+    return saved?.key ? saved : null;
+  } catch {
+    return null;
+  }
+}
+
+// The data in one fixed form: the readers write every field in the same order, so two copies compare as text.
+// They also refuse data that is not Kassa's, whatever the server sends.
+const canonical = (data) => ({ state: parseState(JSON.stringify(data.state)), bank: parseBank(data.bank) });
+const snapshot = () => JSON.stringify(canonical({ state, bank }));
+
+function keepSharing(base) {
+  localStorage.setItem(SHARE_KEY, JSON.stringify(sharing));
+  localStorage.setItem(BASE_KEY, base);
+}
+
+// Puts `data` (canonical) in the app in place of what was there, and saves it on this phone.
+function takeData(data) {
+  ({ state, bank } = data);
+  localStorage.setItem(KEY, JSON.stringify(state));
+  localStorage.setItem(BANK_KEY, JSON.stringify(bank));
+}
+
+function syncSoon() {
+  if (!sharing) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(sync, 1500);
+}
+
+// Brings this phone and the server level: fetches what is new there, joins it with what changed here, and sends
+// the result. One run at a time; a call during a run makes it run once more.
+async function sync(tries = 3) {
+  if (!sharing) return;
+  if (syncing) {
+    syncAgain = true;
+    return;
+  }
+  syncing = true;
+  syncAgain = false;
+  let changed = false;
+  try {
+    const token = await tokenOf(household);
+    const remote = await api('GET', `/vault?have=${sharing.version}`, { token });
+    if (remote) {
+      if (document.querySelector('dialog[open]')) return; // a sheet may be changing what would be replaced: its save syncs again
+      const theirs = canonical(JSON.parse(await openData(household, remote.data)));
+      const mine = snapshot();
+      const base = localStorage.getItem(BASE_KEY);
+      takeData(mine === base ? theirs : canonical(merge(JSON.parse(base), JSON.parse(mine), theirs)));
+      sharing.version = remote.version;
+      keepSharing(JSON.stringify(theirs));
+      changed = true;
+    }
+    const now = snapshot();
+    if (now !== localStorage.getItem(BASE_KEY)) {
+      const sent = await api('PUT', '/vault', { token, body: { base: sharing.version, data: await sealData(household, now) } })
+        .catch((error) => {
+          if (error.status === 409) return null; // the other phone was first: fetch and join once more
+          throw error;
+        });
+      if (sent) {
+        sharing.version = sent.version;
+        keepSharing(now);
+      } else syncAgain = true;
+    }
+    syncedAt = new Date();
+    syncError = null;
+  } catch (error) {
+    syncError = error;
+  } finally {
+    syncing = false;
+  }
+  if (changed || route() === 'meer') render(); // the settings screen shows how the last sync went
+  if (syncAgain && tries > 1) await sync(tries - 1);
+}
+
+// Starts sharing on this phone with household key `key`, the data in the app being version `version`.
+function link(key, cred, version) {
+  household = key;
+  sharing = { key: b64u(key), cred, version };
+  keepSharing(snapshot());
+  syncedAt = new Date();
+  syncError = null;
+  render();
+}
+
+// Replaces what is on this phone with the shared data, and shares from then on.
+async function joinWith(key, cred) {
+  const remote = await api('GET', '/vault?have=0', { token: await tokenOf(key) });
+  takeData(canonical(JSON.parse(await openData(key, remote.data))));
+  link(key, cred, remote.version);
+}
+
+const said = (text) => Object.assign(new Error(text), { say: text });
+const unless404 = (text) => (error) => {
+  throw error.status === 404 ? said(text) : error;
+};
+
+// A passkey made with Face ID, with its key. Some phones hand the key out only on a second Face ID, which needs
+// a tap of its own.
+async function newPasskey() {
+  const made = await makePasskey();
+  if (made.secret) return made;
+  if (!await ask(L('Nog één keer Face ID om de sleutel van de passkey op te halen.', 'One more Face ID to fetch the key of the passkey.'),
+    L('Doorgaan', 'Continue'), true)) throw said(L('Delen is niet gestart.', 'Sharing has not started.'));
+  return usePasskey(made.cred);
+}
+
+function shareError(error) {
+  toast(error.say
+    ?? (error.code === 'noprf' ? L('Deze telefoon geeft met Face ID geen sleutel: delen kan hier niet.', 'This phone gives no key with Face ID: sharing cannot work here.')
+      : error.name === 'NotAllowedError' ? L('Face ID is gestopt. Probeer het opnieuw.', 'Face ID was stopped. Try again.')
+        : error.status ? L('De Kassa-server weigerde dit.', 'The Kassa server refused this.')
+          : L('Geen verbinding met de Kassa-server. Probeer het later opnieuw.', 'No connection with the Kassa server. Try again later.')));
+}
+
+// The first phone puts its data on the server; a phone whose passkey is there already (a new iPhone) fetches it.
+async function startSharing() {
+  try {
+    const { ready } = await api('GET', '/status');
+    if (!ready) {
+      if (!await ask(L('Kassa maakt een passkey met Face ID en zet alles, op slot, op de Kassa-server. Alleen telefoons die jij uitnodigt kunnen het openen.',
+        'Kassa makes a passkey with Face ID and puts everything, locked, on the Kassa server. Only phones you invite can open it.'), L('Delen', 'Share'), true)) return;
+      const { cred, secret } = await newPasskey();
+      const key = rand(32);
+      const data = snapshot();
+      await api('POST', '/setup', { body: { token: await tokenOf(key), cred, wrapped: await wrap(secret, 'kassa wrap', key), data: await sealData(key, data) } });
+      link(key, cred, 1);
+      toast(L('Delen staat aan. Nodig nu iemand uit.', 'Sharing is on. Now invite someone.'));
+      return;
+    }
+    if (!await ask(L('Er wordt al gedeeld. Open de gedeelde gegevens met je Kassa-passkey? Ze vervangen wat nu op deze telefoon staat.',
+      'Sharing has started already. Open the shared data with your Kassa passkey? It replaces what is on this phone now.'), L('Openen', 'Open'))) return;
+    const { cred, secret } = await usePasskey();
+    const { wrapped } = await api('GET', `/key/${cred}`).catch(unless404(L('Deze passkey hoort niet bij de gedeelde gegevens. Vraag om een uitnodigingscode.',
+      'This passkey is not part of the shared data. Ask for an invite code.')));
+    await joinWith(await unwrap(secret, 'kassa wrap', wrapped), cred);
+    toast(L('De gedeelde gegevens staan erin.', 'The shared data is in.'));
+  } catch (error) {
+    shareError(error);
+  }
+}
+
+async function joinSharing() {
+  const code = await askText(L('Uitnodigingscode', 'Invite code'), L('Code', 'Code'), '', {
+    max: 60, ok: L('Doorgaan', 'Continue'), check: (text) => (isCode(text) ? '' : L('Plak de hele code die je kreeg.', 'Paste the whole code you were sent.')),
+  });
+  if (code === null) return;
+  try {
+    const { wrapped } = await api('GET', `/invite/${await inviteId(code)}`)
+      .catch(unless404(L('Deze code is gebruikt of verlopen. Vraag om een nieuwe.', 'This code was used or has expired. Ask for a new one.')));
+    const key = await unwrap(fromB64u(code), 'kassa invite', wrapped);
+    if (!await ask(L('Je maakt een passkey met Face ID. De gedeelde gegevens vervangen wat nu op deze telefoon staat: maak eerst een back-up als je dat wilt bewaren.',
+      'You make a passkey with Face ID. The shared data replaces what is on this phone now: make a backup first if you want to keep it.'), L('Meedoen', 'Join'))) return;
+    const { cred, secret } = await newPasskey();
+    const token = await tokenOf(key);
+    await api('POST', '/key', { token, body: { cred, wrapped: await wrap(secret, 'kassa wrap', key) } });
+    await api('DELETE', '/invite', { token });
+    await joinWith(key, cred);
+    toast(L('Je deelt nu de gegevens.', 'You are sharing the data now.'));
+  } catch (error) {
+    shareError(error);
+  }
+}
+
+async function invite() {
+  try {
+    const code = rand(16);
+    const text = b64u(code);
+    await api('PUT', '/invite', { token: await tokenOf(household), body: { id: await inviteId(text), wrapped: await wrap(code, 'kassa invite', household) } });
+    // the share sheet needs a tap of its own, so the code is shown first
+    if (!await ask(L(`Uitnodigingscode: ${text}. Stuur hem naar wie meedoet; hij werkt één keer, 24 uur lang.`,
+      `Invite code: ${text}. Send it to whoever joins; it works once, for 24 hours.`), L('Code versturen', 'Send code'), true)) return;
+    if (navigator.share) await navigator.share({ text }).catch(() => {}); // closing the share sheet is fine
+    else {
+      await navigator.clipboard.writeText(text);
+      toast(L('Code gekopieerd.', 'Code copied.'));
+    }
+  } catch (error) {
+    shareError(error);
+  }
 }
 
 // ---------- building blocks ----------
@@ -855,6 +1061,33 @@ function transactionsScreen() {
 
 // ---------- settings ----------
 
+const clock = (date) => date.toLocaleTimeString(LOCALE, { hour: '2-digit', minute: '2-digit' });
+
+function shareSection() {
+  if (!sharing) {
+    return `
+      <h2 class="section">${L('Samen delen', 'Sharing')}</h2>
+      <div class="group">
+        <button class="row tint" data-action="share">${L('Delen met Face ID', 'Share with Face ID')}</button>
+        <button class="row tint" data-action="joinShare">${L('Uitnodigingscode invoeren', 'Enter an invite code')}</button>
+      </div>
+      <p class="group-note">${L('Zie op twee telefoons dezelfde kaarten en bankgegevens. Ze gaan op slot naar de Kassa-server; alleen jullie passkeys (Face ID) maken ze open.',
+        'See the same cards and bank data on two phones. They go to the Kassa server locked; only your passkeys (Face ID) open them.')}</p>`;
+  }
+  const status = syncing ? L('Bijwerken…', 'Updating…')
+    : syncError?.status === 401 ? L('Deze telefoon wordt niet meer toegelaten.', 'This phone is no longer let in.')
+      : syncError ? L('Nog niet bijgewerkt: geen verbinding met de Kassa-server. Wat je wijzigt, gaat mee zodra die er is.',
+        'Not updated yet: no connection with the Kassa server. What you change goes along as soon as there is one.')
+        : syncedAt ? L(`Bijgewerkt om ${clock(syncedAt)}.`, `Updated at ${clock(syncedAt)}.`) : '';
+  return `
+    <h2 class="section">${L('Samen delen', 'Sharing')}</h2>
+    <div class="group">
+      <button class="row tint" data-action="invite">${L('Iemand uitnodigen', 'Invite someone')}</button>
+      <button class="row tint" data-action="syncNow">${L('Nu bijwerken', 'Update now')}</button>
+    </div>
+    <p class="group-note" aria-live="polite">${status} ${L('Wat de ander wijzigt, zie je zodra je Kassa opent.', 'You see what the other phone changes as soon as you open Kassa.')}</p>`;
+}
+
 function settingsScreen() {
   return {
     html: `
@@ -880,13 +1113,15 @@ function settingsScreen() {
       </div>
       <p class="group-note">${L('Potjes en statistieken tellen alleen wat op of na deze datum is geboekt. Leeg betekent: alles.',
         'Pots and statistics only count what was booked on or after this date. Empty means: everything.')}</p>
+      ${shareSection()}
       <h2 class="section">${L('Back-up', 'Backup')}</h2>
       <div class="group">
         <button class="row tint" data-action="export">${L('Back-up maken', 'Make a backup')}</button>
         <button class="row tint" data-action="import">${L('Terugzetten', 'Restore')}</button>
       </div>
-      <p class="group-note">${L(`Alles staat alleen op deze telefoon. Het back&#8209;upbestand bevat je kaartnummers en codes en al je
-        bankgegevens, leesbaar voor wie het opent: bewaar het als contant geld.`, `Everything is only on this phone. The backup file holds your card
+      <p class="group-note">${sharing ? L('Alles staat op deze telefoon en, op slot, op de Kassa-server.', 'Everything is on this phone and, locked, on the Kassa server.')
+        : L('Alles staat alleen op deze telefoon.', 'Everything is only on this phone.')} ${L(`Het back&#8209;upbestand bevat je kaartnummers en codes en al je
+        bankgegevens, leesbaar voor wie het opent: bewaar het als contant geld.`, `The backup file holds your card
         numbers and codes and all your bank data, readable to whoever opens it: keep it as safe as cash.`)}</p>
       <h2 class="section">${L('Taal', 'Language')}</h2>
       <div class="group">
@@ -1315,9 +1550,11 @@ function openDialog(dialog, check = () => '') {
   });
 }
 
-async function ask(text, okLabel) {
+// Asks to confirm. The button is red, as most of these delete something; `safe` makes it the plain blue.
+async function ask(text, okLabel, safe = false) {
   $('confirmText').textContent = text;
   $('confirmOk').textContent = okLabel;
+  $('confirmOk').className = safe ? 'row tint' : 'row danger';
   return await openDialog($('confirmDialog')) === 'ok';
 }
 
@@ -1558,15 +1795,18 @@ async function editCat(cat) {
 }
 
 // Resolves with the entered text, or null when cancelled.
-async function askText(title, label, value) {
+// Asks for a line of text: a name, unless `check` says otherwise (it returns an error message, or '' when fine).
+async function askText(title, label, value, { check = (text) => (isName(text) ? '' : L('Vul een naam in.', 'Enter a name.')), max = 30, ok = L('Opslaan', 'Save') } = {}) {
   const form = $('textDialog').querySelector('form');
   $('textTitle').textContent = title;
   $('textLabel').textContent = label;
   form.elements.text.value = value;
+  form.elements.text.maxLength = max;
+  form.querySelector('[value="ok"]').textContent = ok;
   let text;
   const answer = await openDialog($('textDialog'), () => {
     text = form.elements.text.value.trim();
-    return isName(text) ? '' : L('Vul een naam in.', 'Enter a name.');
+    return check(text);
   });
   return answer === 'ok' ? text : null;
 }
@@ -1765,6 +2005,13 @@ const actions = {
   close: (card, button) => closeDialog(button.closest('dialog')),
   export: exportBackup,
   import: () => $('importFile').click(),
+  share: startSharing,
+  joinShare: joinSharing,
+  invite,
+  async syncNow() {
+    await sync();
+    if (syncError) toast(L('De Kassa-server is niet bereikbaar.', 'The Kassa server cannot be reached.'));
+  },
   language() {
     localStorage.setItem(`${KEY}-lang`, L('en', 'nl'));
     location.reload();
@@ -2012,6 +2259,10 @@ state = load();
 bank = loadBank();
 if (catchUp(bank, isoDate()).length) saveBank();
 else render();
+sync();
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && catchUp(bank, isoDate()).length) saveBank();
+  if (document.hidden) return;
+  if (catchUp(bank, isoDate()).length) saveBank();
+  sync(); // what the other phone changed meanwhile
 });
+addEventListener('online', () => sync());

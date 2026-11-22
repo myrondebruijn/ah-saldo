@@ -1,9 +1,9 @@
 // Offline support: answer from the saved copy at once (the shop may have no signal)
 // and refresh that copy in the background.
 // Change the version on every release: a new version then installs as one complete set of files.
-const CACHE = 'kassa-v13';
+const CACHE = 'kassa-v14';
 const FILES = [
-  './', 'style.css', 'app.js', 'logic.js', 'bank.js', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png',
+  './', 'style.css', 'app.js', 'logic.js', 'bank.js', 'sync.js', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png',
   'vendor/pdf.min.mjs', 'vendor/pdf.worker.min.mjs', // the PDF reader for Openbank statements, used only while importing
 ];
 
