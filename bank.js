@@ -595,10 +595,30 @@ export function fixedCosts(bank, month) {
   }).sort((a, b) => (b.expected || b.paid) - (a.expected || a.paid));
 }
 
-// What a running month will have cost at its end, in cents: what is spent, the fixed costs still to come, and the
-// rest at the pace of the days so far. A fixed cost paid already sets no pace: it comes once a month.
-export const forecast = ({ spent, fixedPaid, waiting, day, days }) =>
-  spent + waiting + Math.round(Math.max(0, spent - fixedPaid) / day * (days - day));
+// A payment from this many cents on is no everyday spending: one of them sets no pace for the days after it.
+export const LARGE = 10000;
+// This month's everyday pace weighs as much as the months before once the month is this many days old.
+const STEADY = 7;
+
+// What a day still to come in the month of `today` will probably cost besides the fixed costs, in cents.
+// Everyday payments (under LARGE) go on at this month's pace, steadied by the three months before. A larger
+// payment or money back sets no pace: those count for what they came to per day in the months before.
+// A counterparty the user decided on stays out: a fixed cost is counted by itself, one switched off is over.
+// shortcut: LARGE and STEADY were picked on one household's five months, try them again when there is a year of data.
+export function dayRate(bank, purchases, today) {
+  const month = monthOf(today);
+  const day = Number(today.slice(8));
+  const start = `${month}-01`;
+  const free = bank.txs.filter((tx) => !Object.hasOwn(bank.fixed, ruleKey(tx.name)));
+  const small = free.filter((tx) => tx.cents < 0 && tx.cents > -LARGE);
+  const spent = (txs, from, to) => figures({ ...bank, txs }, purchases, from, to).spending;
+  const now = spent(small, start, '9999');
+  const from = [`${shiftMonth(month, -3)}-01`, bank.since].sort().at(-1);
+  const before = (Date.parse(start) - Date.parse(from)) / 864e5; // the days there is history of
+  if (!(before > 0)) return now / day; // nothing earlier to go by
+  const then = spent(small, from, start);
+  return Math.max(0, (now + then / before * STEADY) / (day + STEADY) + (spent(free, from, start) - then) / before);
+}
 
 // ---------- balances ----------
 

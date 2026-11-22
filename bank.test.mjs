@@ -429,13 +429,26 @@ test('fixed costs: suggested after three single monthly payments, then followed 
   assert.deepEqual(bank.fixedCosts(data, '2026-10').map((each) => each.key), ['verzekeraar']);
 });
 
-test('forecast: what is spent, the fixed costs still to come, and the rest at the pace so far', () => {
-  // 22 of 30 days: €1,274 besides the fixed costs is €57.91 a day, so 8 more days add €463.27
-  assert.equal(bank.forecast({ spent: 188600, fixedPaid: 61200, waiting: 13800, day: 22, days: 30 }), 248727);
-  // money back made the rest negative: it sets no pace at all
-  assert.equal(bank.forecast({ spent: 50000, fixedPaid: 60000, waiting: 0, day: 10, days: 30 }), 50000);
-  // on the last day nothing is added
-  assert.equal(bank.forecast({ spent: 30000, fixedPaid: 0, waiting: 0, day: 30, days: 30 }), 30000);
+test('dayRate: everyday payments set the pace, a large one, money back and a fixed cost do not', () => {
+  const each = (count, over) => Array.from({ length: count }, () => tx(over));
+  const data = withTxs(
+    // July to September, 92 days: €920 in everyday payments is €10 a day; €2,760 large less €920 back is €20 a day
+    ...each(10, { cents: -9200, date: '2026-08-15' }),
+    tx({ name: 'Reisbureau', cents: -276000, date: '2026-07-20' }), tx({ name: 'Reisbureau', cents: 92000, date: '2026-09-02', cat: 'reizen' }),
+    // October, seven days old: €210 in everyday payments is €30 a day
+    ...each(3, { cents: -7000, date: '2026-10-04' }),
+    tx({ name: 'Meubelzaak', cents: -50000, date: '2026-10-02' }), // large: says nothing about tomorrow
+    tx({ name: 'Verzekeraar', cents: -15000, date: '2026-09-05' }), tx({ name: 'Verzekeraar', cents: -15000, date: '2026-10-05' }),
+    tx({ name: 'Lening', cents: -100000, date: '2026-09-28' }),
+  );
+  data.fixed = { verzekeraar: true, lening: false }; // one is followed as a fixed cost, the other was switched off
+  // a week in, this month's pace and the months before weigh the same: €20 a day, and €20 for the larger payments
+  assert.equal(bank.dayRate(data, [], '2026-10-07'), 4000);
+  // nothing before this month: only the pace of the everyday payments so far
+  assert.equal(bank.dayRate({ ...data, since: '2026-10-01' }, [], '2026-10-07'), 3000);
+  // more came back than went out: a day costs nothing, not less than nothing
+  data.txs.push(tx({ name: 'Reisbureau', cents: 600000, date: '2026-09-03', cat: 'reizen' }));
+  assert.equal(bank.dayRate(data, [], '2026-10-07'), 0);
 });
 
 test('shiftMonth steps over year ends', () => {

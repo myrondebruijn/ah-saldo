@@ -4,7 +4,7 @@ import {
   validCode, validNumber,
 } from './logic.js';
 import {
-  AH, START_CATS, US, addBalance, addFile, addStarter, balanceOn, byParty, cardsOn, catchUp, decodeText, dueOn, emptyBank, figures, fixedCosts, forecast,
+  AH, LARGE, START_CATS, US, addBalance, addFile, addStarter, balanceOn, byParty, cardsOn, catchUp, decodeText, dayRate, dueOn, emptyBank, figures, fixedCosts,
   fixedSuggestions, forWhom, giftGuesses, giftsBought, giftsToFill, hasGap, heldShops, inCategory, monthOf, parseBank, payFrom, readCsv,
   addLinked, readLinked, readOpenbank, ruleKey, shiftMonth, sorter,
 } from './bank.js';
@@ -1117,38 +1117,44 @@ function change(cents, text) {
     ?? (euros ? `${euros > 0 ? '+' : '−'} ${wholeEuro(Math.abs(cents))}` : L('gelijk', 'same'))}</span>`;
 }
 
-// The running month added up day by day, the month before as a dashed line beside it, and a dotted line on to
-// what the month will have cost at its end (`ahead`).
-function paceChart(month, day, ahead) {
+// The running month added up day by day, and the month before as a dashed line beside it. From today two lines go
+// on to the end of the month: what is sure (the fixed costs still to come, each on its day; one that is late
+// tomorrow) and, dotted and above it, the forecast, which adds `rate` cents for every day.
+function paceChart(month, day, coming, rate) {
   const before = shiftMonth(month, -1);
   const days = daysIn(month);
   const added = (each, last) => Array.from({ length: last }, (unused, index) => figures(bank, state.purchases, `${each}-01`, afterDay(each, index + 1)).spending);
   const now = added(month, day);
   const then = `${before}-01` >= bank.since ? added(before, daysIn(before)) : [];
-  const top = Math.max(100, ahead, ...now, ...then) * 1.08;
+  const sure = Array.from({ length: days - day + 1 }, (unused, index) => now.at(-1)
+    + coming.filter((each) => Math.max(each.date, day + 1) <= day + index).reduce((sum, each) => sum + each.cost.expected, 0));
+  const ahead = sure.map((cents, index) => cents + Math.round(rate * index));
+  const top = Math.max(100, ahead.at(-1), ...now, ...then) * 1.08;
   const step = [5000, 10000, 20000, 50000, 100000, 200000, 500000].find((each) => top / each <= 3) ?? 1000000;
   const x = (nth) => (4 + (nth - 1) / 30 * 280).toFixed(1);
   const y = (cents) => (160 - cents / top * 144).toFixed(1);
-  const line = (list) => list.map((cents, index) => `${x(index + 1)},${y(cents)}`).join(' ');
+  const line = (list, first = 1) => list.map((cents, index) => `${x(index + first)},${y(cents)}`).join(' ');
   const grid = Array.from({ length: Math.floor(top / step) }, (unused, index) => (index + 1) * step);
   const compact = (cents) => (cents / 100).toLocaleString(LOCALE, { style: 'currency', currency: 'EUR', notation: 'compact' });
   const last = then.length ? `, ${wholeEuro(then.at(-1))} ${L('in', 'in')} ${monthName(before)}` : '';
   return `
-    <svg class="pace" viewBox="0 0 320 180" role="img" aria-label="${L(`Uitgegeven, per dag opgeteld: ${wholeEuro(now.at(-1))} tot nu, in dit tempo ${wholeEuro(ahead)} aan het eind van de maand${last}`,
-      `Spending added up per day: ${wholeEuro(now.at(-1))} so far, at this pace ${wholeEuro(ahead)} by the end of the month${last}`)}">
+    <svg class="pace" viewBox="0 0 320 180" role="img" aria-label="${L(`Uitgegeven, per dag opgeteld: ${wholeEuro(now.at(-1))} tot nu, aan het eind van de maand zeker ${wholeEuro(sure.at(-1))} en verwacht ${wholeEuro(ahead.at(-1))}${last}`,
+      `Spending added up per day: ${wholeEuro(now.at(-1))} so far, ${wholeEuro(sure.at(-1))} for sure and ${wholeEuro(ahead.at(-1))} forecast by the end of the month${last}`)}">
       ${grid.map((cents) => `<line class="grid" x1="4" x2="288" y1="${y(cents)}" y2="${y(cents)}"/>
         <text x="318" y="${(Number(y(cents)) + 4).toFixed(1)}" text-anchor="end">${compact(cents)}</text>`).join('')}
       <line class="base" x1="4" x2="288" y1="160" y2="160"/>
       ${then.length ? `<polyline class="then" points="${line(then)}"/>` : ''}
       <path class="area" d="M${x(1)} 160L${line(now).replaceAll(' ', 'L')}L${x(day)} 160Z"/>
       <polyline class="stroke" points="${line(now)}"/>
-      <line class="ahead" x1="${x(day)}" y1="${y(now.at(-1))}" x2="${x(days)}" y2="${y(ahead)}"/>
+      <polyline class="sure" points="${line(sure, day)}"/>
+      <polyline class="ahead" points="${line(ahead, day)}"/>
       <line class="rule" x1="${x(day)}" x2="${x(day)}" y1="10" y2="160"/>
       <circle class="dot" cx="${x(day)}" cy="${y(now.at(-1))}" r="5"/>
-      <circle class="end" cx="${x(days)}" cy="${y(ahead)}" r="4"/>
+      <circle class="end" cx="${x(days)}" cy="${y(sure.at(-1))}" r="3"/>
+      <circle class="end" cx="${x(days)}" cy="${y(ahead.at(-1))}" r="4"/>
     </svg>
     <p class="axis"><span>${dayShort(`${month}-01`)}</span><span>${dayShort(`${month}-${days}`)}</span></p>
-    <p class="legend"><span><i class="key now"></i>${L('Deze maand', 'This month')}</span><span><i class="key ahead"></i>${L('Verwacht', 'Forecast')}</span>${
+    <p class="legend"><span><i class="key now"></i>${L('Deze maand', 'This month')}</span><span><i class="key sure"></i>${L('Zeker', 'For sure')} ${wholeEuro(sure.at(-1))}</span><span><i class="key ahead"></i>${L('Verwacht', 'Forecast')} ${wholeEuro(ahead.at(-1))}</span>${
       then.length ? `<span><i class="key then"></i>${monthShort(before)} ${wholeEuro(then.at(-1))}</span>` : ''}</p>`;
 }
 
@@ -1193,9 +1199,12 @@ function insightScreen() {
     .map((cost) => ({ cost, tx: lastPaid(cost.key) }))
     .map((each) => ({ ...each, date: Math.min(Number(each.tx.date.slice(8)), days) }))
     .sort((a, b) => a.date - b.date);
-  const ahead = forecast({ spent: now.spending, fixedPaid: fixed.total, waiting: fixed.waiting, day, days });
-  const room = average3 - now.spending - fixed.waiting; // what may still go out and stay under the average
   const daysLeft = days - day;
+  // what the month has cost at its end for sure, and what every day still to come probably adds to that
+  const sure = now.spending + fixed.waiting;
+  const rate = open ? dayRate(bank, state.purchases, isoDate()) : 0;
+  const ahead = sure + Math.round(rate * daysLeft);
+  const room = average3 - sure; // what may still go out and stay under the average
   // From what was left to what the net worth did. Money that only moved is not spending, but a loan repaid or
   // money sent to an account the app does not hold did leave the accounts; the rest is the gift cards (a card
   // is worth more than it cost, and balance can be added or corrected by hand).
@@ -1241,13 +1250,13 @@ function insightScreen() {
           <span>${daysLeft === 1 ? L('nog 1 dag', '1 day left') : L(`nog ${daysLeft} dagen`, `${daysLeft} days left`)}</span></h2>
         <section class="summary">
           <h3 class="chart-title">${L('Uitgegeven tot nu, per dag opgeteld', 'Spent so far, added up per day')}</h3>
-          ${paceChart(view.month, day, ahead)}
+          ${paceChart(view.month, day, coming, rate)}
         </section>
         <div class="tiles">
           <section class="tile">
-            <h3>${L('In dit tempo', 'At this pace')}</h3>
+            <h3>${L('Verwacht', 'Forecast')}</h3>
             <p class="tile-total">${wholeEuro(ahead)}</p>
-            <p class="footnote">${L(`uitgegeven op ${dayShort(`${view.month}-${days}`)}`, `spent by ${dayShort(`${view.month}-${days}`)}`)}</p>
+            <p class="footnote">${L(`uitgegeven op ${dayShort(`${view.month}-${days}`)}, waarvan ${wholeEuro(sure)} zeker`, `spent by ${dayShort(`${view.month}-${days}`)}, ${wholeEuro(sure)} of it for sure`)}</p>
             ${average3 ? `<p class="tile-note ${ahead > average3 ? 'over-text' : 'plus'}">${ahead > average3
               ? L(`${wholeEuro(ahead - average3)} boven je gemiddelde`, `${wholeEuro(ahead - average3)} over your average`)
               : L(`${wholeEuro(average3 - ahead)} onder je gemiddelde`, `${wholeEuro(average3 - ahead)} under your average`)}</p>` : ''}
@@ -1265,7 +1274,9 @@ function insightScreen() {
               <p class="footnote">${fixed.waiting ? L('al, met de vaste lasten die nog komen', 'already, with the fixed costs still to come') : L('al, deze maand', 'already, this month')}</p>
             </section>`}
         </div>
-        ${average3 ? `<p class="group-note">${L('Je gemiddelde is wat er de drie maanden ervoor gemiddeld uitging.', 'Your average is what went out on average in the three months before.')}</p>` : ''}
+        <p class="group-note">${L(`Zeker is wat er al uit is plus de vaste lasten die nog komen. De verwachting telt daar ${wholeEuro(rate)} per dag bij op: je kleine uitgaven in het tempo van deze maand en de drie ervoor, plus wat uitgaven vanaf ${wholeEuro(LARGE)} in die drie maanden gemiddeld per dag kostten. Eén grote uitgave deze maand telt dus niet als tempo.`,
+          `For sure is what went out already plus the fixed costs still to come. The forecast adds ${wholeEuro(rate)} a day to that: your small purchases at the pace of this month and the three before, plus what purchases of ${wholeEuro(LARGE)} or more came to per day in those three months. So one large purchase this month does not count as a pace.`)}${
+          average3 ? ` ${L('Je gemiddelde is wat er de drie maanden ervoor gemiddeld uitging.', 'Your average is what went out on average in the three months before.')}` : ''}</p>
         ${coming.length ? `
           <h2 class="section split-head"><span>${L('Vaste lasten die nog komen', 'Fixed costs still to come')}</span><span>${formatEuro(fixed.waiting)}</span></h2>
           <ul class="group">${coming.map(({ cost, tx, date }) => `
