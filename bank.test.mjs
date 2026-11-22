@@ -220,6 +220,27 @@ test('figures: a gift card payment counts its card part, and a share for someone
   assert.deepEqual(run({ ...purchase(3000, [{ who: 'Wij', cents: 5000 }]), at: '2026-08-01T12:00:00.000Z' }), [0, 0, 0]);
 });
 
+test('groceries split between people: the household keeps its part, the rest is for others', () => {
+  const data = withTxs(
+    tx({ id: 'a', name: 'Jumbo Dorp', cents: -5000, shares: [{ who: 'Wij', cents: 3000 }, { who: 'Oma', cents: 1500 }, { who: 'Team', cents: 500 }] }),
+    tx({ id: 'b', name: 'Lidl Dorp', cents: -2000 }),
+    tx({ id: 'c', name: 'Jumbo Dorp', cents: -1000, shares: [{ who: 'Oma', cents: 1000 }] }), // all of it for someone else
+    tx({ id: 'd', name: 'Bakker', cents: -900, cat: 'fun', shares: [{ who: 'Oma', cents: 900 }] }), // not groceries: shares do nothing
+  );
+  const purchases = [{ at: '2026-07-12T12:00:00.000Z', total: 4000, cards: 2500, shares: [{ who: 'Wij', cents: 3200 }, { who: 'Oma', cents: 800 }] }];
+  const sum = bank.figures(data, purchases, '2026-07-01', '2026-08-01');
+  assert.equal(sum.spending, 5000 + 2000 + 1000 + 900 + 2500);
+  assert.deepEqual([sum.byCat.get('boodschappen'), sum.byCat.get('anderen'), sum.byCat.get('fun')], [3000 + 2000 + 1700, 1500 + 500 + 1000 + 800, 900]);
+  assert.deepEqual(bank.forWhom(data, purchases, '2026-07-01', '2026-08-01'), [['Wij', 6700], ['Oma', 3300], ['Team', 500]]);
+  assert.deepEqual(bank.forWhom(data, purchases, '2026-08-01', '2026-09-01'), []);
+  assert.deepEqual(bank.parseBank(JSON.parse(JSON.stringify(data))).txs[0].shares, data.txs[0].shares);
+  const bad = (shares, cents = -5000) => assert.throws(() => bank.parseBank({ ...bank.emptyBank(), txs: [tx({ cents, shares })] }));
+  bad([{ who: 'Wij', cents: 3000 }]); // does not add up to the amount
+  bad([{ who: '', cents: 5000 }]);
+  bad([{ who: 'Wij', cents: 5000 }], 5000); // money that came in is not split
+  bad([]);
+});
+
 test('inCategory and byParty list what is behind a figure', () => {
   const data = loaded();
   const open = bank.inCategory(data, '', '2026-06-01', '2026-08-01');

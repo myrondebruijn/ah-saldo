@@ -5,7 +5,7 @@ import {
 } from './logic.js';
 import {
   START_CATS, US, addFile, addStarter, balanceOn, byParty, cardsOn, decodeText, emptyBank, figures, fixedCosts, fixedSuggestions,
-  hasGap, inCategory, monthOf, parseBank, readCsv, readOpenbank, ruleKey, shiftMonth, sorter,
+  forWhom, hasGap, inCategory, monthOf, parseBank, readCsv, readOpenbank, ruleKey, shiftMonth, sorter,
 } from './bank.js';
 
 const KEY = 'ah-saldo'; // the app's first name; changing this key would hide everything already saved
@@ -130,7 +130,7 @@ const cardById = (id) => state.cards.find((card) => card.id === id);
 const purchaseById = (id) => state.purchases.find((purchase) => purchase.id === id);
 // the defaults first, then what has been used so far, most recent first
 const listed = (defaults, used) => [...new Set([...defaults, ...used.reverse()])];
-const people = () => listed([US], state.purchases.flatMap((purchase) => purchase.shares.map((share) => share.who)));
+const people = () => listed([US], [...state.purchases, ...bank.txs].flatMap((each) => (each.shares ?? []).map((share) => share.who)));
 const whoText = (purchase) => purchase.shares.map((share) => shown(share.who)).join(', ');
 
 function expiryLabel(card) {
@@ -303,13 +303,17 @@ const meterBar = (share, { over = false, pace = null, rank = false } = {}) => `
 
 // ---------- the bank side: overview ----------
 
-// the row of a transaction; a tap opens the sheet that sorts it
-function txRow(tx, catOf, withAccount = true) {
+// The row of a transaction; a tap opens the sheet that sorts it. The line under the name leaves out what the
+// screen around it already says: the category on a category's own screen, the account when one is chosen.
+function txRow(tx, catOf, { category = true, account = true } = {}) {
   const cat = catOf(tx);
+  const others = cat === 'boodschappen' ? (tx.shares ?? []).filter((share) => share.who !== US).map((share) => esc(shown(share.who))) : [];
   return `
     <li><button class="row tx" data-action="tx" data-id="${esc(tx.id)}">
-      <span class="row-main">${esc(tx.name)} <small>${dayShort(tx.date)} · <span${cat ? '' : ' class="todo"'}>${catName(cat)}</span>${
-        withAccount ? ` · ${esc(accountById(tx.acc)?.name ?? '')}` : ''}</small></span>
+      <span class="row-main">${esc(tx.name)} <small>${dayShort(tx.date)}${
+        category ? ` · <span${cat ? '' : ' class="todo"'}>${catName(cat)}</span>` : ''}${
+        others.length ? ` · ${L('ook voor', 'also for')} ${others.join(', ')}` : ''}${
+        account ? ` · ${esc(accountById(tx.acc)?.name ?? '')}` : ''}</small></span>
       <span class="amount${tx.cents > 0 ? ' plus' : ''}">${signed(tx.cents)}</span>
     </button></li>`;
 }
@@ -476,7 +480,14 @@ function categoryScreen(id) {
   const txs = inCategory(bank, cat?.id ?? '', from, to);
   const catOf = sorter(bank);
   const sign = cat?.kind === 'in' ? 1 : -1; // spending is shown as a positive amount
-  const fromCards = cat ? figures({ ...bank, txs: [] }, state.purchases, from, to).byCat.get(cat.id) ?? 0 : 0;
+  // Who the groceries were for, once any of them was for someone else. Under "Voor anderen" the others alone,
+  // and one row for all that came out of the groceries, by card or by pin.
+  const forOthers = cat?.id === 'anderen';
+  const everyone = cat?.id === 'boodschappen' || forOthers ? forWhom(bank, state.purchases, from, to) : [];
+  const who = forOthers ? everyone.filter(([name]) => name !== US) : everyone.some(([name]) => name !== US) ? everyone : [];
+  const whoTotal = Math.max(1, who.reduce((sum, [, cents]) => sum + Math.max(0, cents), 0));
+  const fromCards = !cat ? 0 : forOthers ? who.reduce((sum, [, cents]) => sum + cents, 0)
+    : figures({ ...bank, txs: [] }, state.purchases, from, to).byCat.get(cat.id) ?? 0;
   const total = cat?.kind === 'none' ? txs.reduce((sum, tx) => sum + tx.cents, 0) : (monthFigures(view.month).byCat.get(cat?.id ?? '') ?? 0);
   const parties = byParty(txs);
   // the size of a bar: what was spent (or, for income, received); money the other way gets none. Unsorted money counts either way.
@@ -502,10 +513,16 @@ function categoryScreen(id) {
         </section>`
       : `<p class="group-note">${L('Tik op een naam en kies een categorie. Alles van die naam gaat dan mee, ook wat later binnenkomt.',
         'Tap a name and choose a category. Everything from that name follows, including what comes in later.')}</p>`}
+      ${who.length ? `
+        <h2 class="section">${L('Voor wie', 'For whom')}</h2>
+        <ul class="group">${who.map(([name, cents]) => `
+          <li class="row meter-row"><span class="row-main">${esc(shown(name))}</span>
+            <span>${formatEuro(cents)}</span>${meterBar(Math.max(0, cents) / whoTotal, { rank: true })}</li>`).join('')}</ul>` : ''}
       ${parties.length || fromCards ? `
         <h2 class="section">${cat ? L('Bij wie', 'Where') : L('Per naam, grootste eerst', 'Per name, largest first')}</h2>
         <ul class="group">
-          ${fromCards ? `<li><a class="row meter-row" href="#/uitgaven"><span class="row-main">${L('AH met cadeaukaarten', 'AH with gift cards')}</span>
+          ${fromCards ? `<li><a class="row meter-row" href="${forOthers ? '#/categorie/boodschappen' : '#/uitgaven'}">
+            <span class="row-main">${forOthers ? L('Uit de boodschappen', 'From the groceries') : L('AH met cadeaukaarten', 'AH with gift cards')}</span>
             <span>${formatEuro(fromCards)}</span>${meterBar(fromCards / whole, { rank: true })}</a></li>` : ''}
           ${parties.slice(0, view.rows).map((party) => `
             <li><button class="row meter-row" data-action="sortParty" data-id="${esc(txs.find((tx) => ruleKey(tx.name) === party.key).id)}">
@@ -515,8 +532,10 @@ function categoryScreen(id) {
             </button></li>`).join('')}
         </ul>
         <h2 class="section">${L('Transacties', 'Transactions')}</h2>
-        <ul class="group">${shownRows.map((tx) => txRow(tx, catOf)).join('')}</ul>
-        ${txs.length > shownRows.length ? `<div class="group"><button class="row tint" data-action="moreRows">${L('Toon meer', 'Show more')}</button></div>` : ''}`
+        <ul class="group">${shownRows.map((tx) => txRow(tx, catOf, { category: false })).join('')}</ul>
+        ${txs.length > shownRows.length ? `<div class="group"><button class="row tint" data-action="moreRows">${L('Toon meer', 'Show more')}</button></div>` : ''}
+        ${cat?.id === 'boodschappen' ? `<p class="group-note">${L('Was iets, of een deel ervan, voor iemand anders? Tik op de transactie en kies Voor wie.',
+          'Was something, or part of it, for someone else? Tap the transaction and choose For whom.')}</p>` : ''}`
       : blank(cat ? L('Niets in deze maand', 'Nothing this month') : L('Alles is ingedeeld', 'Everything is sorted'))}`,
   };
 }
@@ -661,7 +680,7 @@ function txList() {
   for (const tx of found.slice(0, view.rows)) months.set(monthOf(tx.date), [...(months.get(monthOf(tx.date)) ?? []), tx]);
   return `${[...months].map(([month, txs]) => `
     <h2 class="section">${monthName(month)}</h2>
-    <ul class="group">${txs.map((tx) => txRow(tx, catOf, view.acc === 'all')).join('')}</ul>`).join('')}
+    <ul class="group">${txs.map((tx) => txRow(tx, catOf, { account: view.acc === 'all' })).join('')}</ul>`).join('')}
     ${found.length > view.rows ? `<div class="group"><button class="row tint" data-action="moreRows">${L('Toon meer', 'Show more')} (${found.length - view.rows})</button></div>` : ''}`;
 }
 
@@ -1171,12 +1190,13 @@ async function askAmount(title, label, check = () => '') {
   return answer === 'ok' ? cents : null;
 }
 
-// Asks who a purchase was for and saves the answer. One name takes everything; with Verdelen on, the
-// other names get the amounts typed behind them and the chosen name gets what is left.
-async function askWho(purchase) {
+// Asks who an amount of `total` cents was for, starting from the `current` shares; `note` says what it is about.
+// One name takes everything; with Verdelen on, the other names get the amounts typed behind them and the chosen
+// name gets what is left. Resolves with the new shares, or null when cancelled.
+async function pickShares(total, note, current) {
   const form = $('whoDialog').querySelector('form');
-  const main = purchase.shares[0].who; // shares are kept largest first
-  const part = (who) => (who === main ? '' : euroInput(purchase.shares.find((share) => share.who === who)?.cents ?? 0)).replace(/^0[,.]00$/, '');
+  const main = current[0].who; // shares are kept largest first
+  const part = (who) => (who === main ? '' : euroInput(current.find((share) => share.who === who)?.cents ?? 0)).replace(/^0[,.]00$/, '');
   const choice = (who, name) => `
     <label class="row choice">
       <input type="radio" name="who" value="${esc(who)}"${who === main ? ' checked autofocus' : ''}>
@@ -1184,11 +1204,11 @@ async function askWho(purchase) {
       <input class="part" data-who="${esc(who)}" inputmode="decimal" autocomplete="off" placeholder="${L('0,00', '0.00')}"
         value="${part(who)}" aria-label="${L('Bedrag voor', 'Amount for')} ${esc(shown(who)) || L('de andere naam', 'the other name')}">
     </label>`;
-  $('whoNote').textContent = `${formatEuro(purchase.total)} ${L('bij', 'at')} ${shown(purchase.store)}`;
+  $('whoNote').textContent = note;
   const otherName = L('Andere naam', 'Other name');
   $('whoNames').innerHTML = people().map((who) => choice(who, `<span class="row-main">${esc(shown(who))}</span>`)).join('')
     + choice('', `<input class="row-main" name="other" maxlength="30" autocomplete="off" placeholder="${otherName}" aria-label="${otherName}">`);
-  form.elements.split.checked = purchase.shares.length > 1;
+  form.elements.split.checked = current.length > 1;
   const other = form.elements.other;
   other.oninput = () => { other.closest('label').querySelector('[type="radio"]').checked = true; }; // typing a new name chooses it
   let shares;
@@ -1204,16 +1224,22 @@ async function askWho(purchase) {
       if (cents && !isName(who)) return L('Vul een naam in bij het bedrag.', 'Type a name with the amount.');
       if (cents && who !== chosen) parts.push([who, cents]);
     }
-    shares = shareOut(purchase.total, chosen, parts);
-    return shares === 'over' ? L(`Dat is samen meer dan ${formatEuro(purchase.total)}.`, `That adds up to more than ${formatEuro(purchase.total)}.`) : '';
+    shares = shareOut(total, chosen, parts);
+    return shares === 'over' ? L(`Dat is samen meer dan ${formatEuro(total)}.`, `That adds up to more than ${formatEuro(total)}.`) : '';
   });
-  if (answer !== 'ok') return;
+  return answer === 'ok' ? shares : null;
+}
+
+// Asks who a purchase was for and saves the answer.
+async function askWho(purchase) {
+  const shares = await pickShares(purchase.total, `${formatEuro(purchase.total)} ${L('bij', 'at')} ${shown(purchase.store)}`, purchase.shares);
+  if (!shares) return;
   purchase.shares = shares;
   save();
 }
 
 // Sorts a transaction: a category for it alone, or for everything from its counterparty, and whether
-// that counterparty is a fixed cost.
+// that counterparty is a fixed cost. Groceries can also be split between people, as a gift card payment can.
 async function askTx(tx) {
   const form = $('txDialog').querySelector('form');
   const key = ruleKey(tx.name); // empty for a name without letters: then there is nothing to hang a rule on
@@ -1232,8 +1258,22 @@ async function askTx(tx) {
   all.checked = Boolean(key) && tx.cat === undefined;
   $('txFixedRow').hidden = !key || tx.cents >= 0;
   fixed.checked = bank.fixed[key] === true;
+  // "Voor wie?" shows while Boodschappen is the chosen category; the answer is kept here until the sheet is saved
+  let shares = tx.shares ?? [{ who: US, cents: -tx.cents }];
+  const showWho = () => {
+    $('txWhoGroup').hidden = tx.cents >= 0 || form.elements.cat.value !== 'boodschappen';
+    $('txWhoNow').textContent = shares.map((share) => shown(share.who)).join(', ');
+  };
+  $('txCats').onchange = showWho;
+  $('txWho').onclick = async () => {
+    shares = await pickShares(-tx.cents, `${formatEuro(-tx.cents)} ${L('bij', 'at')} ${tx.name}`, shares) ?? shares;
+    showWho();
+  };
+  showWho();
   if (await openDialog($('txDialog')) !== 'ok') return;
   const cat = form.elements.cat.value;
+  if (cat === 'boodschappen' && tx.cents < 0 && shares.some((share) => share.who !== US)) tx.shares = shares;
+  else delete tx.shares;
   if (all.checked) {
     if (cat) bank.rules[key] = cat;
     else delete bank.rules[key];

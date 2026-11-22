@@ -266,10 +266,15 @@ export function shiftMonth(month, by) {
   return isoDate(date).slice(0, 7);
 }
 
+// Groceries can be split between people: `shares` ([{ who, cents }]) on a gift card payment, and on a bank
+// transaction that is sorted as groceries. The household's own part stays groceries; what was for others
+// counts under "Voor anderen".
+const forOthers = (shares) => (shares ?? []).reduce((sum, share) => sum + (share.who === US ? 0 : share.cents), 0);
+
 // What a gift card payment adds to the figures: only the part the cards paid, because the pin part is on the
 // bank statement. A share for someone else comes out of the card part first.
 function cardParts(purchase) {
-  const others = Math.min(purchase.cards, purchase.shares.reduce((sum, share) => sum + (share.who === US ? 0 : share.cents), 0));
+  const others = Math.min(purchase.cards, forOthers(purchase.shares));
   return [['boodschappen', purchase.cards - others], ['anderen', others]];
 }
 
@@ -289,7 +294,12 @@ export function figures(bank, purchases, from, to) {
     const cat = catOf(tx);
     const kind = cat ? kinds.get(cat) : tx.cents < 0 ? 'out' : 'in';
     if (!cat) result.open++;
-    if (kind === 'out') { result.spending -= tx.cents; add(cat, -tx.cents); }
+    if (kind === 'out') {
+      const others = cat === 'boodschappen' ? forOthers(tx.shares) : 0;
+      result.spending -= tx.cents;
+      add(cat, -tx.cents - others);
+      if (others) add('anderen', others);
+    }
     if (kind === 'in') { result.income += tx.cents; add(cat, tx.cents); }
   }
   for (const purchase of purchases) {
@@ -300,6 +310,32 @@ export function figures(bank, purchases, from, to) {
     }
   }
   return result;
+}
+
+// Who the groceries from `from` up to `to` were for: [name, cents], the largest first. It covers what the bank
+// shows as groceries and the part of a gift card payment that the cards paid.
+export function forWhom(bank, purchases, from, to) {
+  const catOf = sorter(bank);
+  const start = from > bank.since ? from : bank.since;
+  const sums = new Map();
+  const add = (who, cents) => sums.set(who, (sums.get(who) ?? 0) + cents);
+  for (const tx of bank.txs) {
+    if (tx.date < start || tx.date >= to || catOf(tx) !== 'boodschappen') continue;
+    for (const share of tx.shares ?? []) if (share.who !== US) add(share.who, share.cents);
+    add(US, -tx.cents - forOthers(tx.shares));
+  }
+  for (const purchase of purchases) {
+    const date = isoDate(new Date(purchase.at));
+    if (date < start || date >= to) continue;
+    let left = purchase.cards; // a share for someone else comes out of the card part first, as in the figures
+    for (const share of purchase.shares) {
+      const cents = share.who === US ? 0 : Math.min(left, share.cents);
+      if (cents) add(share.who, cents);
+      left -= cents;
+    }
+    add(US, left);
+  }
+  return [...sums].filter(([, cents]) => cents !== 0).sort((a, b) => b[1] - a[1]);
 }
 
 // The transactions of one category ('' = not sorted yet) from `from` up to `to`, newest first.
@@ -388,7 +424,11 @@ const isText = (text, max) => typeof text === 'string' && text.length <= max && 
 const isTx = (tx) => typeof tx?.id === 'string' && /^[\w.-]{1,120}$/.test(tx.id) && isId(tx.acc) && isDate(tx.date)
   && Number.isInteger(tx.cents) && isText(tx.name, 60) && tx.name.length > 0 && isText(tx.text ?? '', 100)
   && (tx.iban === undefined || /^[A-Z0-9]{1,34}$/.test(tx.iban))
-  && (tx.own === undefined || tx.own === true) && (tx.cat === undefined || isId(tx.cat));
+  && (tx.own === undefined || tx.own === true) && (tx.cat === undefined || isId(tx.cat))
+  // shares split money that went out, name by name, and add up to all of it
+  && (tx.shares === undefined || (tx.cents < 0 && Array.isArray(tx.shares) && tx.shares.length > 0
+    && tx.shares.every((share) => isName(share?.who) && Number.isInteger(share.cents) && share.cents > 0)
+    && tx.shares.reduce((sum, share) => sum + share.cents, 0) === -tx.cents));
 const isAccount = (account) => isId(account?.id) && isName(account.name) && isText(account.bank ?? '', 20)
   && (account.balance === undefined || Number.isInteger(account.balance))
   && (account.holder === undefined || isText(account.holder, 30)) && (account.card === undefined || account.card === true);
@@ -413,8 +453,9 @@ export function parseBank(data) {
       id, name, bank: bank ?? '', through, uploaded,
       ...(balance !== undefined && { balance }), ...(holder && { holder }), ...(card && { card }),
     })),
-    txs: data.txs.map(({ id, acc, date, cents, name, text, iban, own, cat }) => ({
+    txs: data.txs.map(({ id, acc, date, cents, name, text, iban, own, cat, shares }) => ({
       id, acc, date, cents, name, text: text ?? '', ...(iban && { iban }), ...(own && { own }), ...(cat && { cat }),
+      ...(shares && { shares: shares.map(({ who, cents: part }) => ({ who, cents: part })) }),
     })),
     cats: data.cats.map(({ id, name, kind, budget }) => ({ id, name, kind, ...(budget && { budget }) })),
     rules: { ...data.rules }, fixed: { ...data.fixed }, since: data.since,
