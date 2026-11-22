@@ -503,7 +503,8 @@ const monthFigures = (month) => figures(bank, state.purchases, ...monthRange(mon
 const cardTotal = () => state.cards.reduce((sum, card) => sum + Math.max(balance(card), 0), 0);
 
 // What the screens of the bank side are looking at. It lasts until the app is closed.
-const view = { month: thisMonth(), unit: 'month', query: '', cat: 'all', acc: 'all', rows: 60 };
+// `worth` is a month tapped on the net worth line; '' follows the month on screen.
+const view = { month: thisMonth(), unit: 'month', worth: '', query: '', cat: 'all', acc: 'all', rows: 60 };
 
 const cardById = (id) => state.cards.find((card) => card.id === id);
 const purchaseById = (id) => state.purchases.find((purchase) => purchase.id === id);
@@ -1203,9 +1204,9 @@ function insightScreen() {
   const worthIs = worthOn(dayBefore(to));
   const moves = bank.cats.filter((cat) => cat.kind === 'none').map((cat) => [cat, now.moved.get(cat.id) ?? 0]).filter(([, cents]) => cents);
   const cardGain = worthIs - worthWas - left - moves.reduce((sum, [, cents]) => sum + cents, 0);
-  // net worth at the end of each month; the running month stands at today. The chart marks the month on screen.
+  // net worth at the end of each month; the running month stands at today. The chart marks a month tapped on it, else the month on screen.
   const points = chartMonths().map((month) => ({ id: month, name: monthShort(month), cents: worthOn(month === thisMonth() ? '9999' : `${month}-31`) }));
-  const worthMonth = points.some((point) => point.id === view.month) ? view.month : points.at(-1)?.id;
+  const worthMonth = [view.worth, view.month].find((month) => points.some((point) => point.id === month)) ?? points.at(-1)?.id;
   const links = (coming.length ? '' : fixedRow) + savedRow(from, to);
   if (!bank.accounts.length) {
     return { html: `<header class="large-title"><h1>${L('Inzicht', 'Insight')}</h1></header>
@@ -1294,7 +1295,7 @@ function insightScreen() {
         <section class="summary worth">
           <p class="footnote">${worthMonth === thisMonth() ? L('Nu', 'Now') : `${L('Eind', 'End of')} ${monthName(worthMonth)}`}</p>
           <p class="total small">${formatEuro(points.find((point) => point.id === worthMonth).cents)}</p>
-          ${lineChart(points, worthMonth, 'pickMonth')}
+          ${lineChart(points, worthMonth, 'pickWorth')}
         </section>` : ''}
       ${moves.length || cardGain ? `
         <ul class="group">
@@ -2449,17 +2450,21 @@ const actions = {
   monthStep(card, button) {
     const by = Number(button.dataset.by) * (route() === 'inzicht' && view.unit === 'year' ? 12 : 1);
     const month = shiftMonth(view.month, by);
-    view.month = month > thisMonth() ? thisMonth() : month;
+    Object.assign(view, { month: month > thisMonth() ? thisMonth() : month, worth: '' });
     redraw(`[data-by="${button.dataset.by}"]`);
   },
-  // a column of a chart or a month on the net worth line: focus stays on the same kind of thing
   pickMonth(card, button) {
-    Object.assign(view, { month: button.dataset.id, unit: 'month' });
-    redraw(`.${button.classList[0]}[aria-pressed="true"]`);
+    Object.assign(view, { month: button.dataset.id, unit: 'month', worth: '' });
+    redraw('.column[aria-pressed="true"]');
   },
   unit(card, button) {
-    view.unit = button.dataset.id;
+    Object.assign(view, { unit: button.dataset.id, worth: '' });
     redraw(`[data-action="unit"][data-id="${view.unit}"]`);
+  },
+  // a month on the net worth line: only the net worth shows that month, the rest of the screen stays
+  pickWorth(card, button) {
+    view.worth = button.dataset.id;
+    redraw('.hit[aria-pressed="true"]');
   },
   moreRows() {
     view.rows += 100;
