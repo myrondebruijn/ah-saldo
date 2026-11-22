@@ -145,6 +145,40 @@ test('reading a file again, or one that overlaps, adds nothing twice', () => {
   assert.equal(data.txs.length, 14);
 });
 
+// ---------- made-up lines as the Rabo link (Enable Banking) sends them ----------
+const linked = (seq, date, amount, indicator, party, { iban, code = 'bc', text, status = 'BOOK' } = {}) => ({
+  entry_reference: String(seq), status, booking_date: date, value_date: date, credit_debit_indicator: indicator,
+  transaction_amount: { currency: 'EUR', amount }, bank_transaction_code: { code: '0', sub_code: code },
+  [indicator === 'DBIT' ? 'creditor' : 'debtor']: { name: party },
+  [indicator === 'DBIT' ? 'creditor_account' : 'debtor_account']: iban ? { iban } : null,
+  remittance_information: text ? [text] : [],
+});
+const LINKED = [{
+  iban: 'NL00TEST0123456789',
+  balances: [{ balance_type: 'XPCD', balance_amount: { amount: '1.00' } }, { balance_type: 'ITBD', balance_amount: { amount: '2662.90' } }],
+  txs: [ // as the link sends them: not oldest first
+    linked(19, '2026-07-02', '40.00', 'DBIT', 'Rabobank Nederland', { code: 'cc' }),
+    linked(17, '2026-06-30', '47.00', 'DBIT', 'Wissel Nederland B.V.', { iban: 'NL00TEST0000000002', code: 'id' }),
+    linked(18, '2026-07-01', '20.00', 'CRDT', 'AAB INZ TIKKIE', { iban: 'NL00TEST0000000003', code: 'cb', text: 'Etentje' }),
+    linked(20, '2026-07-02', '5.00', 'DBIT', 'Nog niet geboekt', { status: 'PDNG' }),
+  ],
+}];
+
+test('the Rabo link gives the lines of the CSV the same ids and texts, so only new ones are added', () => {
+  const data = loaded();
+  const csv = data.txs.find((each) => each.id === 'NL00TEST0123456789.18');
+  const file = bank.readLinked(LINKED);
+  assert.deepEqual(file.txs.find((each) => each.id === csv.id), csv);
+  assert.deepEqual(file.txs.map((each) => each.id.split('.')[1]), ['17', '18', '19']);
+  assert.equal(bank.addFile(data, file, NOW), 1); // 17 and 18 were in the CSV, 20 is not booked yet
+  assert.deepEqual(data.txs.at(-1), { id: 'NL00TEST0123456789.19', acc: 'NL00TEST0123456789', date: '2026-07-02', cents: -4000, name: 'Rabobank Nederland', text: '', own: true });
+  assert.deepEqual([data.accounts[0].balance, data.accounts[0].through, data.accounts[0].name], [266290, '2026-07-02', 'Rabo 6789']);
+  assert.equal(bank.hasGap(data, data.accounts[0]), false);
+  assert.deepEqual(bank.readLinked([{ ...LINKED[0], txs: [] }]).txs, []); // nothing new since the last time
+  assert.throws(() => bank.readLinked([{ ...LINKED[0], txs: [{ ...LINKED[0].txs[0], entry_reference: 'x1' }] }]), /broken/);
+  assert.throws(() => bank.readLinked([{ ...LINKED[0], txs: [{ ...LINKED[0].txs[0], transaction_amount: { amount: '4,00' } }] }]), /broken/);
+});
+
 test('a balance on an earlier day follows from what was booked after it', () => {
   const data = loaded();
   const [account] = data.accounts;

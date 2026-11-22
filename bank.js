@@ -205,6 +205,38 @@ export function readOpenbank(items) {
   });
 }
 
+// What the Kassa server fetched through the Rabo link (Enable Banking): [{ iban, txs, balances }] as the bank
+// sends them. A line's entry_reference is the Volgnr of the CSV export and the other fields hold what its columns
+// hold, so a line has the same id and text whichever way it came in. The date is the booking date, which the
+// CSV shows one day later for a few lines. May hold no new lines at all; is otherwise read whole or not at all.
+export function readLinked(list) {
+  const toCents = (amount) => (/^-?\d+(\.\d{1,2})?$/.test(amount) ? Math.round(Number(amount) * 100) : null);
+  const accounts = [];
+  const txs = [];
+  for (const { iban, txs: lines, balances } of list) {
+    const booked = balances.find((each) => each.balance_type === 'ITBD') ?? balances.find((each) => each.balance_type === 'CLBD');
+    const balance = booked && toCents(booked.balance_amount.amount);
+    accounts.push({ id: iban, name: `Rabo ${iban.slice(-4)}`, bank: 'Rabo', ...(Number.isInteger(balance) && { balance }) });
+    // oldest first, as in the CSV: lists keep that order within a day (the link sends the newest first)
+    for (const line of lines.filter((each) => each.status === 'BOOK').sort((a, b) => a.entry_reference - b.entry_reference)) {
+      const debit = line.credit_debit_indicator === 'DBIT';
+      const cents = toCents(line.transaction_amount.amount);
+      if (!/^\d+$/.test(line.entry_reference) || cents === null || !['DBIT', 'CRDT'].includes(line.credit_debit_indicator)) throw broken();
+      const name = tidy((debit ? line.creditor : line.debtor)?.name);
+      const text = tidy((line.remittance_information ?? []).join(' '));
+      const other = (debit ? line.creditor_account : line.debtor_account)?.iban;
+      txs.push({
+        id: `${iban}.${Number(line.entry_reference)}`, acc: iban, date: line.booking_date, cents: debit ? -cents : cents,
+        name: (name || text || '?').slice(0, 60), text: text.slice(0, 100),
+        ...(other && { iban: other }),
+        ...(line.bank_transaction_code?.sub_code === 'cc' && { own: true }), // as the CSV's Code 'cc': paying off the credit card
+      });
+    }
+  }
+  if (!txs.every(isTx) || !accounts.every(isAccount)) throw broken();
+  return { accounts, txs };
+}
+
 // Adds what a file holds to the saved bank data and returns how many of its transactions were new.
 // A transaction that is already there (same id) is left alone, so files may overlap or be read twice.
 export function addFile(bank, file, now) {

@@ -6,7 +6,7 @@ import {
 import {
   AH, START_CATS, US, addBalance, addFile, addStarter, balanceOn, byParty, cardsOn, catchUp, decodeText, dueOn, emptyBank, figures, fixedCosts,
   fixedSuggestions, forWhom, giftGuesses, giftsBought, giftsToFill, hasGap, heldShops, inCategory, monthOf, parseBank, payFrom, readCsv,
-  readOpenbank, ruleKey, shiftMonth, sorter,
+  readLinked, readOpenbank, ruleKey, shiftMonth, sorter,
 } from './bank.js';
 import {
   api, b64u, fromB64u, inviteId, isCode, makePasskey, merge, openData, rand, sealData, tokenOf, unwrap, usePasskey, wrap,
@@ -230,6 +230,7 @@ function shareError(error) {
   toast(error.say
     ?? (error.code === 'noprf' ? L('Deze telefoon geeft met Face ID geen sleutel: delen kan hier niet.', 'This phone gives no key with Face ID: sharing cannot work here.')
       : error.name === 'NotAllowedError' ? L('Face ID is gestopt. Probeer het opnieuw.', 'Face ID was stopped. Try again.')
+        : error.status === 502 ? L('De bank weigerde dit. Probeer het later opnieuw.', 'The bank refused this. Try again later.')
         : error.status ? L('De Kassa-server weigerde dit.', 'The Kassa server refused this.')
           : L('Geen verbinding met de Kassa-server. Probeer het later opnieuw.', 'No connection with the Kassa server. Try again later.')));
 }
@@ -298,6 +299,82 @@ async function invite() {
     }
   } catch (error) {
     shareError(error);
+  }
+}
+
+// ---------- the Rabo link ----------
+// With sharing on, the Kassa server can fetch the new lines of the linked Rabo account itself (see worker/index.js).
+// Kassa asks for them when it opens and while it is on screen, at most once an hour per phone. Linking goes through
+// Rabo's own consent page, which sends the person back to Kassa's address with a one-time code.
+
+const RABO_KEY = `${KEY}-rabo`; // on this phone: { until: when the link ends, at: the last try, ok: the last fetch, failed }
+const HOUR = 60 * 60 * 1000;
+let rabo = readRabo();
+
+function readRabo() {
+  try {
+    return JSON.parse(localStorage.getItem(RABO_KEY)) ?? {};
+  } catch {
+    return {};
+  }
+}
+const keepRabo = () => localStorage.setItem(RABO_KEY, JSON.stringify(rabo));
+
+async function fetchRabo() {
+  if (!sharing || Date.now() - (rabo.at ?? 0) < HOUR) return;
+  rabo.at = Date.now(); // a failed try waits an hour too
+  keepRabo();
+  // from a week before the newest last line (the linked account's: it is fetched most), as the link may date a line a day
+  // earlier than the CSV and what is there already is not added again; Rabo gives at most 90 days. hasGap tells of a hole.
+  const last = bank.accounts.filter((account) => account.bank === 'Rabo' && !account.card && account.through).map((account) => account.through).sort().at(-1);
+  const from = last ? isoDate(new Date(Math.max(Date.parse(last) - 7 * 24 * HOUR, Date.now() - 89 * 24 * HOUR))) : '';
+  try {
+    const got = await api('GET', `/bank${from && `?from=${from}`}`, { token: await tokenOf(household) });
+    const file = readLinked(got.accounts);
+    if (busy()) {
+      rabo.at = 0; // adding now would undo what is being entered: the next round tries again
+      return;
+    }
+    const added = addFile(bank, file, new Date().toISOString());
+    Object.assign(rabo, { until: got.until, ok: Date.now(), failed: false });
+    catchUp(bank, isoDate());
+    saveBank();
+    if (added) toast(L(`${plural(added, 'nieuwe transactie', 'nieuwe transacties')} van Rabo.`, `${plural(added, 'new transaction', 'new transactions')} from Rabo.`));
+  } catch (error) {
+    if (error.status === 404) rabo = { at: rabo.at }; // nothing is linked
+    else rabo.failed = true;
+  } finally {
+    keepRabo();
+  }
+}
+
+async function linkRabo() {
+  try {
+    const { url } = await api('POST', '/bank/start', { token: await tokenOf(household), body: {} });
+    location.href = url;
+  } catch (error) {
+    shareError(error);
+  }
+}
+
+// Back from Rabo: `code` when consent was given. This may open in Safari instead of the Home Screen app; the
+// server keeps the link, so it works from either.
+async function backFromRabo(params) {
+  history.replaceState(null, '', location.pathname + location.hash); // the code works once: a reload must not send it again
+  if (!params.get('code')) {
+    toast(L('Rabo is niet gekoppeld.', 'Rabo has not been linked.'));
+    return;
+  }
+  try {
+    const { until } = await api('POST', '/bank/finish', { body: { state: params.get('state'), code: params.get('code') } });
+    rabo = { until };
+    keepRabo();
+    render();
+    toast(sharing ? L('Rabo is gekoppeld.', 'Rabo is linked.') : L('Rabo is gekoppeld. Ga terug naar Kassa op je beginscherm.', 'Rabo is linked. Go back to Kassa on your Home Screen.'));
+    fetchRabo();
+  } catch (error) {
+    if (error.status === 403) toast(L('Deze koppeling is verlopen of al gebruikt. Koppel opnieuw in Instellingen.', 'This link has expired or was used already. Link again in Settings.'));
+    else shareError(error);
   }
 }
 
@@ -717,6 +794,11 @@ function overviewScreen() {
             `The last upload is ${oldest} days old. Time for new files.`)}</span></p>
           ${uploadRow()}
         </div>` : ''}
+      ${sharing && rabo.until && daysLeft(rabo.until.slice(0, 10), today) <= 14 ? `
+        <div class="group"><a class="row notice" href="#/meer">${icon('warn')}<span class="row-main">${daysLeft(rabo.until.slice(0, 10), today) < 0
+          ? L('De Rabo-koppeling is verlopen. Koppel opnieuw in Instellingen.', 'The Rabo link has ended. Link again in Settings.')
+          : L(`De Rabo-koppeling loopt af op ${dayShort(rabo.until.slice(0, 10))}. Koppel opnieuw in Instellingen.`,
+            `The Rabo link ends on ${dayShort(rabo.until.slice(0, 10))}. Link again in Settings.`)}</span>${icon('next')}</a></div>` : ''}
       ${gaps.length ? `
         <div class="group"><p class="row notice">${icon('warn')}<span class="row-main">${L('Er ontbreken transacties bij', 'Transactions are missing for')}
           ${gaps.map((account) => esc(account.name)).join(', ')}. ${L('Upload ook de periode ertussen.', 'Upload the period in between as well.')}</span></p></div>` : ''}
@@ -1090,6 +1172,23 @@ function shareSection() {
     <p class="group-note" aria-live="polite">${status} ${L('Zolang Kassa open is, zie je binnen tien seconden wat de ander wijzigt.', 'While Kassa is open, you see what the other phone changes within ten seconds.')}</p>`;
 }
 
+// Only with sharing on: the server lets in only phones of the household.
+function raboSection() {
+  if (!sharing) return '';
+  const until = rabo.until ? formatDate(rabo.until) : '';
+  const time = rabo.ok ? `${formatDate(rabo.ok)}, ${new Date(rabo.ok).toLocaleTimeString(LOCALE, { hour: '2-digit', minute: '2-digit' })}` : '';
+  const status = !until ? L('Koppel je Rabo-betaalrekening: dan haalt Kassa nieuwe transacties zelf op als je de app opent. Elke 180 dagen keur je dat opnieuw goed in de Rabo-app.',
+    'Link your Rabo current account: Kassa then fetches new transactions itself when you open the app. Every 180 days you approve that again in the Rabo app.')
+    : `${L(`Gekoppeld tot ${until}.`, `Linked until ${until}.`)} ${rabo.failed ? L('Ophalen lukte de laatste keer niet.', 'Fetching failed the last time.')
+      : time ? L(`Laatst opgehaald ${time}.`, `Last fetched ${time}.`) : ''}`;
+  return `
+    <div class="group">
+      <button class="row tint" data-action="linkRabo">${until ? L('Rabo opnieuw koppelen', 'Link Rabo again') : L('Rabo koppelen', 'Link Rabo')}</button>
+    </div>
+    <p class="group-note">${status} ${L('De transacties gaan via de Kassa-server en Enable Banking, die ze kunnen lezen.',
+      'The transactions pass through the Kassa server and Enable Banking, which can read them.')}</p>`;
+}
+
 function settingsScreen() {
   return {
     html: `
@@ -1103,6 +1202,7 @@ function settingsScreen() {
       <p class="group-note">${L(`Kies één of meer bestanden: het CSV-bestand van een Rabo-rekening of creditcard, of het PDF-afschrift van Openbank.
         Bestanden mogen elkaar overlappen: wat er al staat, komt er niet nog eens bij.`, `Choose one or more files: the CSV file of a Rabo account or
         credit card, or the PDF statement from Openbank. Files may overlap: what is already there is not added again.`)}</p>
+      ${raboSection()}
       ${bank.accounts.length ? `
         <h2 class="section">${L('Rekeningen', 'Accounts')}</h2>
         <ul class="group">${accountRows()}</ul>
@@ -2010,6 +2110,7 @@ const actions = {
   share: startSharing,
   joinShare: joinSharing,
   invite,
+  linkRabo,
   async syncNow() {
     await sync();
     render();
@@ -2263,10 +2364,14 @@ bank = loadBank();
 if (catchUp(bank, isoDate()).length) saveBank();
 else render();
 sync();
+const back = new URLSearchParams(location.search);
+if (back.has('state')) backFromRabo(back);
+else fetchRabo();
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) return;
   if (catchUp(bank, isoDate()).length) saveBank();
   sync(); // what the other phone changed meanwhile
+  fetchRabo();
 });
 addEventListener('online', () => sync());
-setInterval(() => document.hidden || sync(), 10_000); // while Kassa is on screen: the other phone's changes show up within seconds
+setInterval(() => document.hidden || (sync(), fetchRabo()), 10_000); // while Kassa is on screen: the other phone's changes show up within seconds

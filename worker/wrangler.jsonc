@@ -3,6 +3,7 @@
   "name": "kassa-sync",
   "main": "index.js",
   "compatibility_date": "2026-11-01",
-  "vars": { "ORIGIN": "https://myrondebruijn.github.io" },
+  // EB_APP: the Enable Banking app's id, not a secret; its private key is: npx wrangler secret put EB_KEY < the .pem
+  "vars": { "ORIGIN": "https://myrondebruijn.github.io", "EB_APP": "817a5b2d-e124-4088-a43b-36c913fbc8d4" },
   "d1_databases": [{ "binding": "DB", "database_name": "kassa", "database_id": "7acc4928-6409-4ca4-9db6-e89f9c83e439" }]
 }
