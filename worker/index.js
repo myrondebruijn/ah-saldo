@@ -17,6 +17,16 @@
 // POST /bank/start    -> { url }                      (token) the page where Rabo asks for consent; then back to the app
 // POST /bank/finish   { state, code } -> { until }    the app came back with these; no token, as it may open in Safari
 // GET  /bank?from=D   -> { until, accounts }          (token) per account: booked lines since day D, and its balances
+//
+// Notifications (Web Push, see push.js) to the phones that turned them on. Four times a day (wrangler.jsonc) the
+// server looks for new Rabo lines itself; mornings it also warns before the link ends and while last month is open.
+// GET  /push          -> { key }                      (token) the server's public key, to subscribe with
+// PUT  /push          { endpoint, p256dh, auth, lang } -> { id }  (token) this phone wants notifications
+// DELETE /push/:id                                    (token) not any more
+// POST /month         { month, missing, spending, income, open }  (token) how far a phone got with closing last month:
+//                                                     the account names still missing, or none and the month's totals
+
+import { makeVapid, send } from './push.js';
 
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
@@ -55,7 +65,116 @@ async function bank(env, method, path, { body, ip } = {}) {
   return response.json();
 }
 
-async function handle(request, env) {
+// The booked lines of one account since day `from`, every page of them
+async function booked(env, uid, from, ip) {
+  const txs = [];
+  let next = '';
+  do {
+    const page = await bank(env, 'GET', `/accounts/${uid}/transactions?transaction_status=BOOK${from && `&date_from=${from}`}${next && `&continuation_key=${encodeURIComponent(next)}`}`, { ip });
+    txs.push(...page.transactions);
+    next = page.continuation_key;
+  } while (next);
+  return txs;
+}
+
+// Remembers the highest line number per account that a phone or a check has seen, and returns the lines above the
+// one remembered before: the new ones. An account seen for the first time has none yet.
+async function newLines(db, found) {
+  const row = await db.prepare("SELECT value FROM config WHERE name = 'seen'").first();
+  const seen = row ? JSON.parse(row.value) : {};
+  const fresh = [];
+  for (const { iban, txs } of found) {
+    const numbered = txs.filter((line) => line.status === 'BOOK' && /^\d+$/.test(line.entry_reference));
+    if (iban in seen) fresh.push(...numbered.filter((line) => Number(line.entry_reference) > seen[iban]));
+    seen[iban] = Math.max(seen[iban] ?? 0, ...numbered.map((line) => Number(line.entry_reference)));
+  }
+  await db.prepare("INSERT OR REPLACE INTO config (name, value) VALUES ('seen', ?)").bind(JSON.stringify(seen)).run();
+  return fresh;
+}
+
+// ---------- notifications ----------
+
+const T = (lang, nl, en) => (lang === 'en' ? en : nl);
+const euro = (lang, cents) => new Intl.NumberFormat(T(lang, 'nl-NL', 'en-GB'), { style: 'currency', currency: 'EUR' }).format(Math.abs(cents) / 100);
+const monthName = (lang, month) => {
+  const name = new Date(`${month}-15T12:00:00Z`).toLocaleDateString(T(lang, 'nl-NL', 'en-GB'), { month: 'long', year: 'numeric', timeZone: 'UTC' });
+  return name[0].toUpperCase() + name.slice(1);
+};
+const lineText = (lang, line) => {
+  const debit = line.credit_debit_indicator === 'DBIT';
+  const name = String((debit ? line.creditor : line.debtor)?.name || (line.remittance_information ?? []).join(' ') || '?').replace(/\s+/g, ' ').trim().slice(0, 40);
+  return `${name} ${debit ? '−' : '+'} ${euro(lang, Math.round(Number(line.transaction_amount.amount) * 100))}`;
+};
+
+// The VAPID key pair, made the first time it is needed and kept in the database, so nobody has to handle it.
+async function vapid(db) {
+  const read = () => db.prepare("SELECT value FROM config WHERE name = 'vapid'").first();
+  if (!await read()) await db.prepare("INSERT OR IGNORE INTO config (name, value) VALUES ('vapid', ?)").bind(JSON.stringify(await makeVapid())).run();
+  return JSON.parse((await read()).value); // another request may have made one first
+}
+
+// Sends `make(lang)` ({ title, body }) to the phones with notifications on that `pick` picks; returns their ids.
+// A phone that turned notifications off is forgotten.
+async function notify(env, make, pick = () => true) {
+  const { results } = await env.DB.prepare('SELECT * FROM phones').all();
+  const chosen = results.filter(pick);
+  if (!chosen.length) return [];
+  const keys = await vapid(env.DB);
+  await Promise.all(chosen.map(async (phone) => {
+    const status = await send(phone, make(phone.lang), keys, `${env.ORIGIN}/ah-saldo/`).catch(() => 0);
+    if (status === 404 || status === 410) await env.DB.prepare('DELETE FROM phones WHERE id = ?').bind(phone.id).run();
+    else if (status >= 400 || !status) console.log(`push refused: ${status}`);
+  }));
+  return chosen.map((phone) => phone.id);
+}
+
+// The other phones hear that something changed, at most once an hour each: sorting twenty lines is one ping.
+async function pingOthers(env, me, now) {
+  const ids = await notify(env, (lang) => ({ title: 'Kassa', body: T(lang, 'Op de andere telefoon is iets gewijzigd.', 'Something was changed on the other phone.') }),
+    (phone) => phone.id !== me && phone.pinged < now - HOUR);
+  for (const id of ids) await env.DB.prepare('UPDATE phones SET pinged = ? WHERE id = ?').bind(now, id).run();
+}
+
+// Four times a day: new Rabo lines. In the morning round also the end of the link and a month that is still open.
+async function check(env, now) {
+  const link = await env.DB.prepare('SELECT accounts, until FROM bank WHERE id = 1 AND session IS NOT NULL').first();
+  if (link) {
+    try {
+      const from = new Date(now - 5 * DAY).toISOString().slice(0, 10);
+      const found = [];
+      // no ip: nobody is there, so these count against the few fetches a day the bank allows
+      for (const { uid, iban } of JSON.parse(link.accounts)) found.push({ iban, txs: await booked(env, uid, from) });
+      const fresh = await newLines(env.DB, found);
+      if (fresh.length) {
+        await notify(env, (lang) => ({
+          title: fresh.length === 1 ? T(lang, 'Nieuw bij Rabo', 'New at Rabo') : T(lang, `${fresh.length} nieuwe transacties bij Rabo`, `${fresh.length} new transactions at Rabo`),
+          body: [...fresh.slice(0, 4).map((line) => lineText(lang, line)), ...(fresh.length > 4 ? [T(lang, `en ${fresh.length - 4} meer`, `and ${fresh.length - 4} more`)] : [])].join('\n'),
+        }));
+      }
+    } catch (error) {
+      console.log(`rabo check failed: ${error.message}`); // the bank said no (too often today?); the next round tries again
+    }
+  }
+  if (new Date(now).getUTCHours() !== 7) return;
+  const left = link && Math.round((Date.parse(link.until) - now) / DAY);
+  if (left === 14 || left === 3) {
+    await notify(env, (lang) => ({ title: T(lang, 'Rabo-koppeling loopt af', 'Rabo link ending'),
+      body: T(lang, `Over ${left} dagen. Koppel opnieuw in Kassa, bij Instellingen.`, `In ${left} days. Link again in Kassa, in Settings.`) }));
+  }
+  const day = new Date(now).getUTCDate();
+  if (day < 2 || (day - 2) % 3) return; // the 2nd, 5th, 8th ...
+  const month = new Date(Date.UTC(new Date(now).getUTCFullYear(), new Date(now).getUTCMonth() - 1, 1)).toISOString().slice(0, 7);
+  const state = await env.DB.prepare('SELECT closed, missing FROM months WHERE month = ?').bind(month).first();
+  if (state?.closed) return;
+  const missing = JSON.parse(state?.missing ?? '[]');
+  await notify(env, (lang) => ({
+    title: T(lang, `${monthName(lang, month)} is nog niet afgesloten`, `${monthName(lang, month)} is not closed yet`),
+    body: missing.length ? T(lang, `Nog nodig: ${missing.join(', ')}.`, `Still needed: ${missing.join(', ')}.`)
+      : T(lang, 'Open Kassa om de maand af te sluiten.', 'Open Kassa to close the month.'),
+  }));
+}
+
+async function handle(request, env, ctx) {
   const db = env.DB;
   const url = new URL(request.url);
   const [, what, id] = url.pathname.split('/');
@@ -108,7 +227,42 @@ async function handle(request, env) {
     if (!Number.isInteger(body.base) || !isText(body.data, MAX)) return fail(400);
     const { meta } = await db.prepare('UPDATE vault SET data = ?, version = version + 1, at = ? WHERE id = 1 AND version = ?')
       .bind(body.data, now, body.base).run();
-    return meta.changes ? json({ version: body.base + 1 }) : fail(409);
+    if (!meta.changes) return fail(409);
+    ctx.waitUntil(pingOthers(env, isText(body.me, 64) ? body.me : '', now)); // `me`: the sending phone's notification id
+    return json({ version: body.base + 1 });
+  }
+  if (route === 'GET /push') return json({ key: (await vapid(db)).key });
+  if (route === 'PUT /push') {
+    const service = /^https:\/\/(web\.push\.apple\.com|fcm\.googleapis\.com|[\w.-]+\.push\.services\.mozilla\.com|[\w.-]+\.notify\.windows\.com)\/\S{1,900}$/;
+    if (!service.test(body.endpoint) || !isText(body.p256dh, 200) || !isText(body.auth, 100) || !['nl', 'en'].includes(body.lang)) return fail(400);
+    const phone = (await hash(body.endpoint)).slice(0, 32);
+    await db.prepare('INSERT INTO phones (id, endpoint, p256dh, auth, lang, pinged) VALUES (?, ?, ?, ?, ?, 0) ON CONFLICT (id) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth, lang = excluded.lang')
+      .bind(phone, body.endpoint, body.p256dh, body.auth, body.lang).run();
+    return json({ id: phone });
+  }
+  if (route === 'DELETE /push/:id') {
+    await db.prepare('DELETE FROM phones WHERE id = ?').bind(id).run();
+    return fail(204);
+  }
+  if (route === 'POST /month') {
+    const { month, missing, spending, income, open } = body;
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month) || !Array.isArray(missing) || missing.length > 20
+      || !missing.every((name) => typeof name === 'string' && name.length > 0 && name.length <= 40)
+      || ![spending, income, open].every(Number.isInteger)) return fail(400);
+    await db.prepare("INSERT OR IGNORE INTO months (month, closed, missing) VALUES (?, 0, '[]')").bind(month).run();
+    // a closed month stays closed and is announced once, also when both phones close it at the same moment
+    const { meta } = await db.prepare('UPDATE months SET closed = ?, missing = ? WHERE month = ? AND closed = 0')
+      .bind(missing.length ? 0 : 1, JSON.stringify(missing), month).run();
+    if (meta.changes && !missing.length) {
+      const left = income - spending;
+      ctx.waitUntil(notify(env, (lang) => ({
+        title: T(lang, `${monthName(lang, month)} afgesloten`, `${monthName(lang, month)} closed`),
+        body: T(lang, `Uitgegeven ${euro(lang, spending)} · binnengekomen ${euro(lang, income)} · ${left >= 0 ? 'over' : 'tekort'} ${euro(lang, left)}`,
+          `Spent ${euro(lang, spending)} · came in ${euro(lang, income)} · ${left >= 0 ? 'left' : 'short'} ${euro(lang, left)}`)
+          + (open ? T(lang, ` · nog ${open} in te delen`, ` · ${open} still to sort`) : ''),
+      })));
+    }
+    return fail(204);
   }
   if (route === 'PUT /invite') {
     if (!/^[0-9a-f]{64}$/.test(body.id) || !isText(body.wrapped)) return fail(400);
@@ -136,16 +290,11 @@ async function handle(request, env) {
     const ip = request.headers.get('CF-Connecting-IP');
     const accounts = [];
     for (const { uid, iban } of JSON.parse(row.accounts)) {
-      const txs = [];
-      let next = '';
-      do {
-        const page = await bank(env, 'GET', `/accounts/${uid}/transactions?transaction_status=BOOK${from && `&date_from=${from}`}${next && `&continuation_key=${encodeURIComponent(next)}`}`, { ip });
-        txs.push(...page.transactions);
-        next = page.continuation_key;
-      } while (next);
+      const txs = await booked(env, uid, from, ip);
       const { balances } = await bank(env, 'GET', `/accounts/${uid}/balances`, { ip });
       accounts.push({ iban, txs, balances });
     }
+    await newLines(db, accounts); // the phone has these now: the next check does not announce them
     return json({ until: row.until, accounts });
   }
   if (route === 'DELETE /invite') {
@@ -156,7 +305,10 @@ async function handle(request, env) {
 }
 
 export default {
-  async fetch(request, env) {
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(check(env, event.scheduledTime));
+  },
+  async fetch(request, env, ctx) {
     const cors = {
       'Access-Control-Allow-Origin': env.ORIGIN,
       'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE',
@@ -165,7 +317,7 @@ export default {
     };
     let response;
     try {
-      response = request.method === 'OPTIONS' ? fail(204) : await handle(request, env);
+      response = request.method === 'OPTIONS' ? fail(204) : await handle(request, env, ctx);
     } catch (error) {
       response = fail(error.status ?? 400); // the bank said no, or unreadable JSON and the like; nothing was written
     }

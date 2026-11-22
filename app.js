@@ -95,6 +95,7 @@ function saveBank() {
   }
   render();
   syncSoon();
+  reportMonth();
 }
 
 // ---------- sharing ----------
@@ -174,7 +175,8 @@ async function sync(tries = 3) {
     }
     const now = snapshot();
     if (now !== localStorage.getItem(BASE_KEY)) {
-      const sent = await api('PUT', '/vault', { token, body: { base: sharing.version, data: await sealData(household, now) } })
+      const me = localStorage.getItem(PUSH_KEY) ?? undefined; // so the server does not tell this phone what it changed itself
+      const sent = await api('PUT', '/vault', { token, body: { base: sharing.version, data: await sealData(household, now), me } })
         .catch((error) => {
           if (error.status === 409) return null; // the other phone was first: fetch and join once more
           throw error;
@@ -386,6 +388,75 @@ async function backFromRabo(params) {
     if (error.status === 403) toast(L('Deze koppeling is verlopen of al gebruikt. Koppel opnieuw in Instellingen.', 'This link has expired or was used already. Link again in Settings.'));
     else shareError(error);
   }
+}
+
+// ---------- notifications ----------
+// Web Push from the Kassa server (worker/index.js says when). iOS shows them only for Kassa on the Home Screen, and
+// asks permission only straight from a tap, so the server's key is fetched ahead.
+
+const PUSH_KEY = `${KEY}-push`; // this phone's id at the server while notifications are on
+let pushKey = '';
+
+async function sendSubscription(subscription) {
+  const { endpoint, keys } = subscription.toJSON();
+  const { id } = await api('PUT', '/push', { token: await tokenOf(household), body: { endpoint, p256dh: keys.p256dh, auth: keys.auth, lang } });
+  localStorage.setItem(PUSH_KEY, id);
+}
+
+async function pushOn() {
+  try {
+    if (!pushKey) throw said(L('Geen verbinding met de Kassa-server. Probeer het later opnieuw.', 'No connection with the Kassa server. Try again later.'));
+    const registration = await navigator.serviceWorker.ready;
+    await sendSubscription(await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: fromB64u(pushKey) }));
+    render();
+    toast(L('Meldingen staan aan.', 'Notifications are on.'));
+  } catch (error) {
+    if (error.name === 'NotAllowedError') {
+      toast(L('Meldingen zijn niet toegestaan. Zet ze aan in de iPhone-instellingen bij Meldingen, Kassa.', 'Notifications are not allowed. Turn them on in the iPhone settings under Notifications, Kassa.'));
+    } else shareError(error);
+  }
+}
+
+async function pushOff() {
+  const id = localStorage.getItem(PUSH_KEY);
+  localStorage.removeItem(PUSH_KEY);
+  render();
+  toast(L('Meldingen staan uit.', 'Notifications are off.'));
+  await navigator.serviceWorker.ready.then((registration) => registration.pushManager.getSubscription()).then((subscription) => subscription?.unsubscribe()).catch(() => {});
+  if (id) await api('DELETE', `/push/${id}`, { token: await tokenOf(household) }).catch(() => {}); // else the server forgets it at the next message
+}
+
+// At start: the key ahead of a tap, and this phone's subscription once more, which also brings a changed language.
+async function startPush() {
+  if (!sharing || !('PushManager' in window)) return;
+  try {
+    pushKey = (await api('GET', '/push', { token: await tokenOf(household) })).key;
+    if (!localStorage.getItem(PUSH_KEY)) return;
+    const subscription = await (await navigator.serviceWorker.ready).pushManager.getSubscription();
+    if (subscription) await sendSubscription(subscription);
+    else localStorage.removeItem(PUSH_KEY); // turned off in the iPhone settings
+  } catch { /* offline: the next start tries again */ }
+}
+
+// ---------- closing a month ----------
+// Last month is closed once every bank account has news from after it: a line booked, or a file read or fetched,
+// after its last day. An account with nothing on it (balance 0, no lines that month) does not count. Each phone tells
+// the server how far it got; the server announces a closed month once, and reminds while it is not.
+
+const MONTH_KEY = `${KEY}-month`; // what this phone told the server last
+
+function reportMonth() {
+  if (!sharing || !bank.accounts.length) return;
+  const month = shiftMonth(thisMonth(), -1);
+  const next = `${thisMonth()}-01`;
+  const missing = bank.accounts.filter((account) => !account.shop && account.through < next && isoDate(new Date(account.uploaded)) < next
+    && !(account.balance === 0 && !bank.txs.some((tx) => tx.acc === account.id && monthOf(tx.date) === month)))
+    .map((account) => account.name.slice(0, 40));
+  const told = JSON.stringify({ month, missing });
+  if (localStorage.getItem(MONTH_KEY) === told) return;
+  const { spending, income, open } = monthFigures(month);
+  tokenOf(household).then((token) => api('POST', '/month', { token, body: { month, missing, spending, income, open } }))
+    .then(() => localStorage.setItem(MONTH_KEY, told), () => {}); // not sent: the next save tries again
 }
 
 // ---------- building blocks ----------
@@ -1200,6 +1271,23 @@ function raboSection() {
       'The transactions pass through the Kassa server and Enable Banking, which can read them.')}</p>`;
 }
 
+function pushSection() {
+  if (!sharing) return '';
+  const on = Boolean(localStorage.getItem(PUSH_KEY));
+  const can = standalone && 'PushManager' in window;
+  return `
+    <h2 class="section">${L('Meldingen', 'Notifications')}</h2>
+    ${can ? `<div class="group"><button class="row tint" data-action="${on ? 'pushOff' : 'pushOn'}">${on ? L('Meldingen uitzetten', 'Turn notifications off')
+      : L('Meldingen aanzetten', 'Turn notifications on')}</button></div>` : ''}
+    <p class="group-note">${can ? '' : L('Meldingen werken alleen in Kassa op je beginscherm. ', 'Notifications only work in Kassa on your Home Screen. ')}${L(
+      `Per telefoon: nieuwe Rabo-transacties (tot vier keer per dag), wijzigingen op de andere telefoon (hooguit één keer per uur),
+      een afgesloten maand met wat er uitging en binnenkwam, een herinnering zolang een maand nog bestanden mist, en het aflopen van de
+      Rabo-koppeling. Daarvoor gaan de maandtotalen en de namen van de rekeningen naar de Kassa-server.`,
+      `Per phone: new Rabo transactions (up to four times a day), changes on the other phone (at most once an hour), a closed month
+      with what went out and came in, a reminder while a month still misses files, and the end of the Rabo link. For this, the
+      monthly totals and the account names go to the Kassa server.`)}</p>`;
+}
+
 function settingsScreen() {
   return {
     html: `
@@ -1227,6 +1315,7 @@ function settingsScreen() {
       <p class="group-note">${L('Potjes en statistieken tellen alleen wat op of na deze datum is geboekt. Leeg betekent: alles.',
         'Pots and statistics only count what was booked on or after this date. Empty means: everything.')}</p>
       ${shareSection()}
+      ${pushSection()}
       <h2 class="section">${L('Back-up', 'Backup')}</h2>
       <div class="group">
         <button class="row tint" data-action="export">${L('Back-up maken', 'Make a backup')}</button>
@@ -2123,6 +2212,8 @@ const actions = {
   invite,
   linkRabo,
   fetchRabo: () => fetchRabo(true),
+  pushOn,
+  pushOff,
   async syncNow() {
     await sync();
     render();
@@ -2379,6 +2470,8 @@ sync();
 const back = new URLSearchParams(location.search);
 if (back.has('state')) backFromRabo(back);
 else fetchRabo();
+startPush();
+reportMonth();
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) return;
   if (catchUp(bank, isoDate()).length) saveBank();
