@@ -417,16 +417,21 @@ export function parseBank(data) {
   };
 }
 
-// A starter file: categories, rules, choices and names prepared outside the app, added to what is there.
-// { cats, rules, fixed, since, names: account id -> name, choices: transaction id -> category id }
-// Returns false, and changes nothing, when the file is not that.
-export function addStarter(bank, starter) {
-  const { cats = [], rules = {}, fixed = {}, since = '', names = {}, choices = {} } = starter ?? {};
+// A starter file: everything prepared outside the app, added to what is there. It may hold bank files that
+// were read already (`files`, each as a reader returns it, read at the moment `at`), and categories, rules,
+// choices and names: { files, at, cats, rules, fixed, since, names: account id -> name, choices: transaction id -> category id }
+// Returns how many transactions were new, or null, changing nothing, when the file is not that.
+export function addStarter(bank, starter, now) {
+  const { files = [], at = now, cats = [], rules = {}, fixed = {}, since = '', names = {}, choices = {} } = starter ?? {};
   const ok = starter?.kind === 'kassa-start' && Array.isArray(cats) && cats.every(isCat)
     && isRules(rules, isId) && isRules(fixed, (value) => typeof value === 'boolean') && (since === '' || isDate(since))
     && typeof names === 'object' && Object.values(names).every(isName)
-    && typeof choices === 'object' && Object.values(choices).every(isId);
-  if (!ok) return false;
+    && typeof choices === 'object' && Object.values(choices).every(isId)
+    && Array.isArray(files) && files.every((file) => Array.isArray(file?.accounts) && file.accounts.every(isAccount)
+      && Array.isArray(file.txs) && file.txs.every(isTx))
+    && (files.length === 0 || (typeof at === 'string' && !Number.isNaN(Date.parse(at))));
+  if (!ok) return null;
+  const added = files.reduce((sum, file) => sum + addFile(bank, file, at), 0);
   for (const cat of cats) {
     const saved = bank.cats.find((each) => each.id === cat.id);
     if (saved) Object.assign(saved, cat);
@@ -437,5 +442,5 @@ export function addStarter(bank, starter) {
   if (since) bank.since = since;
   for (const account of bank.accounts) if (names[account.id]) account.name = names[account.id];
   for (const tx of bank.txs) if (choices[tx.id]) tx.cat = choices[tx.id];
-  return true;
+  return added;
 }

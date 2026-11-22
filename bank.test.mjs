@@ -282,14 +282,30 @@ test('a starter file adds categories, rules, names and choices, or nothing at al
     rules: { 'voorbeeld b v': 'salaris' }, fixed: { verzekeraar: true },
     names: { NL00TEST0123456789: 'Betaalrekening' }, choices: { 'NL00TEST0123456789.15': 'sport' },
   };
-  assert.equal(bank.addStarter(data, starter), true);
+  assert.equal(bank.addStarter(data, starter), 0); // it brought no transactions
   assert.equal(data.cats.length, bank.START_CATS.length + 1);
   assert.equal(data.cats.find((cat) => cat.id === 'fun').budget, 40000);
   assert.deepEqual([data.since, data.accounts[0].name, data.txs[4].cat, data.rules['voorbeeld b v']], ['2026-06-01', 'Betaalrekening', 'sport', 'salaris']);
   assert.doesNotThrow(() => bank.parseBank(JSON.parse(JSON.stringify(data))));
   const before = JSON.stringify(data);
-  for (const wrong of [null, {}, { kind: 'kassa-start', cats: [{ id: 'x' }] }, { kind: 'kassa-start', rules: { a: '<b>' } }]) {
-    assert.equal(bank.addStarter(data, wrong), false);
+  const badFile = { kind: 'kassa-start', at: NOW, files: [{ accounts: [], txs: [{ id: '<b>' }] }] };
+  for (const wrong of [null, {}, { kind: 'kassa-start', cats: [{ id: 'x' }] }, { kind: 'kassa-start', rules: { a: '<b>' } }, badFile]) {
+    assert.equal(bank.addStarter(data, wrong), null);
   }
   assert.equal(JSON.stringify(data), before);
+});
+
+test('a starter file can bring the bank files themselves, read already', () => {
+  const starter = {
+    kind: 'kassa-start', at: '2026-11-20T10:00:00.000Z', files: [bank.readCsv(RABO), bank.readCsv(CARD)],
+    names: { NL00TEST0123456789: 'Betaalrekening' }, choices: { 'NL00TEST0123456789.15': 'overig' },
+  };
+  const data = bank.emptyBank();
+  assert.equal(bank.addStarter(data, JSON.parse(JSON.stringify(starter)), NOW), 11);
+  const [account] = data.accounts;
+  assert.deepEqual([account.name, account.balance, account.through, account.uploaded], ['Betaalrekening', 270290, '2026-07-01', '2026-11-20T10:00:00.000Z']);
+  assert.equal(data.txs.find((tx) => tx.id === 'NL00TEST0123456789.15').cat, 'overig'); // sorted, though it arrived in the same file
+  assert.equal(bank.addStarter(data, starter, NOW), 0); // twice adds nothing
+  assert.equal(bank.addFile(data, bank.readCsv(RABO), NOW), 0); // and neither does the bank file itself afterwards
+  assert.doesNotThrow(() => bank.parseBank(JSON.parse(JSON.stringify(data))));
 });
