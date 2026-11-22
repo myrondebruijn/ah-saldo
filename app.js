@@ -397,7 +397,8 @@ const paidWith = (cards, total) => `
 
 // ---------- cards, card, archive ----------
 
-const backupNotice = () => (state.needsBackup ? `
+// while sharing, every change is on the server a moment after it is saved
+const backupNotice = () => (state.needsBackup && !sharing ? `
   <div class="group">
     <p class="row notice">${icon('warn')}<span class="row-main">${L('Er zijn nieuwe gegevens zonder back&#8209;up.', 'There is new data without a backup.')}</span></p>
     <button class="row tint" data-action="export">${L('Back-up maken', 'Make a backup')}</button>
