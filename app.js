@@ -320,10 +320,12 @@ function readRabo() {
 }
 const keepRabo = () => localStorage.setItem(RABO_KEY, JSON.stringify(rabo));
 
-async function fetchRabo() {
-  if (!sharing || Date.now() - (rabo.at ?? 0) < HOUR) return;
+// `asked`: the Fetch now button, which does not wait for the hour and says how it went
+async function fetchRabo(asked = false) {
+  if (!sharing || (!asked && Date.now() - (rabo.at ?? 0) < HOUR)) return;
   rabo.at = Date.now(); // a failed try waits an hour too
   keepRabo();
+  if (asked) toast(L('Ophalen bij Rabo…', 'Fetching from Rabo…'));
   // from a week before the newest last line (the linked account's: it is fetched most), as the link may date a line a day
   // earlier than the CSV and what is there already is not added again; Rabo gives at most 90 days. hasGap tells of a hole.
   const last = bank.accounts.filter((account) => account.bank === 'Rabo' && !account.card && account.through).map((account) => account.through).sort().at(-1);
@@ -339,10 +341,18 @@ async function fetchRabo() {
     Object.assign(rabo, { until: got.until, ok: Date.now(), failed: false });
     catchUp(bank, isoDate());
     saveBank();
-    if (added) toast(L(`${plural(added, 'nieuwe transactie', 'nieuwe transacties')} van Rabo.`, `${plural(added, 'new transaction', 'new transactions')} from Rabo.`));
+    if (added || asked) {
+      toast(added ? L(`${plural(added, 'nieuwe transactie', 'nieuwe transacties')} van Rabo.`, `${plural(added, 'new transaction', 'new transactions')} from Rabo.`)
+        : L('Niets nieuws van Rabo.', 'Nothing new from Rabo.'));
+    }
   } catch (error) {
     if (error.status === 404) rabo = { at: rabo.at }; // nothing is linked
     else rabo.failed = true;
+    if (asked) {
+      render();
+      if (error.status === 404) toast(L('Rabo is niet gekoppeld.', 'Rabo has not been linked.'));
+      else shareError(error);
+    }
   } finally {
     keepRabo();
   }
@@ -1183,6 +1193,7 @@ function raboSection() {
       : time ? L(`Laatst opgehaald ${time}.`, `Last fetched ${time}.`) : ''}`;
   return `
     <div class="group">
+      <button class="row tint" data-action="fetchRabo">${L('Nu ophalen bij Rabo', 'Fetch from Rabo now')}</button>
       <button class="row tint" data-action="linkRabo">${until ? L('Rabo opnieuw koppelen', 'Link Rabo again') : L('Rabo koppelen', 'Link Rabo')}</button>
     </div>
     <p class="group-note">${status} ${L('De transacties gaan via de Kassa-server en Enable Banking, die ze kunnen lezen.',
@@ -2111,6 +2122,7 @@ const actions = {
   joinShare: joinSharing,
   invite,
   linkRabo,
+  fetchRabo: () => fetchRabo(true),
   async syncNow() {
     await sync();
     render();
