@@ -381,7 +381,8 @@ function overviewScreen() {
         <p class="footnote">${L('Uitgegeven in', 'Spent in')} ${monthName(month)}</p>
         <p class="total">${formatEuro(now.spending)}</p>
         <p class="footnote">${L('Binnengekomen', 'Came in')} ${formatEuro(now.income)} · ${now.income >= now.spending
-          ? `${L('over', 'left')} ${formatEuro(now.income - now.spending)}` : `${L('tekort', 'short')} ${formatEuro(now.spending - now.income)}`}</p>
+          ? `<span class="amount">${L('over', 'left')} ${formatEuro(now.income - now.spending)}</span>`
+          : `<span class="amount">${L('tekort', 'short')} ${formatEuro(now.spending - now.income)}</span>`}</p>
       </a>
       ${oldest > STALE ? `
         <div class="group">
@@ -476,7 +477,9 @@ function categoryScreen(id) {
   const fromCards = cat ? figures({ ...bank, txs: [] }, state.purchases, from, to).byCat.get(cat.id) ?? 0 : 0;
   const total = cat?.kind === 'none' ? txs.reduce((sum, tx) => sum + tx.cents, 0) : (monthFigures(view.month).byCat.get(cat?.id ?? '') ?? 0);
   const parties = byParty(txs);
-  const whole = Math.max(1, fromCards + parties.reduce((sum, party) => sum + Math.abs(party.cents), 0)); // the bars are shares of this
+  // the size of a bar: what was spent (or, for income, received); money the other way gets none. Unsorted money counts either way.
+  const size = (party) => (cat && cat.kind !== 'none' ? Math.max(0, sign * party.cents) : Math.abs(party.cents));
+  const whole = Math.max(1, fromCards + parties.reduce((sum, party) => sum + size(party), 0)); // the bars are shares of this
   const months = Array.from({ length: 6 }, (unused, index) => shiftMonth(view.month >= shiftMonth(thisMonth(), -5) ? thisMonth() : view.month, index - 5));
   const shownRows = txs.slice(0, view.rows);
   return {
@@ -506,7 +509,7 @@ function categoryScreen(id) {
             <li><button class="row meter-row" data-action="sortParty" data-id="${esc(txs.find((tx) => ruleKey(tx.name) === party.key).id)}">
               <span class="row-main">${esc(party.name)}${party.count > 1 ? ` <small class="inline">${party.count}×</small>` : ''}</span>
               <span class="${cat ? '' : party.cents > 0 ? 'plus' : ''}">${cat && cat.kind !== 'none' ? formatEuro(sign * party.cents) : signed(party.cents)}</span>
-              ${meterBar(Math.abs(party.cents) / whole, { rank: true })}
+              ${meterBar(size(party) / whole, { rank: true })}
             </button></li>`).join('')}
         </ul>
         <h2 class="section">${L('Transacties', 'Transactions')}</h2>
