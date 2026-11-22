@@ -1,8 +1,11 @@
 // Offline support: answer from the saved copy at once (the shop may have no signal)
 // and refresh that copy in the background.
 // Change the version on every release: a new version then installs as one complete set of files.
-const CACHE = 'kassa-v9';
-const FILES = ['./', 'style.css', 'app.js', 'logic.js', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png'];
+const CACHE = 'kassa-v10';
+const FILES = [
+  './', 'style.css', 'app.js', 'logic.js', 'bank.js', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png',
+  'vendor/pdf.min.mjs', 'vendor/pdf.worker.min.mjs', // the PDF reader for Openbank statements, used only while importing
+];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(FILES)).then(() => self.skipWaiting()));

@@ -25,12 +25,22 @@
     <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 4h4M6 7l.9 12.2A2 2 0 0 0 8.9 21h6.2a2 2 0 0 0 2-1.8L18 7M10 11v6M14 11v6"/></symbol>
     <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 9v4M12 17h.01M10.3 4.2L2.4 18a2 2 0 0 0 1.7 3h15.8a2 2 0 0 0 1.7-3L13.7 4.2a2 2 0 0 0-3.4 0z"/></symbol>
     <symbol id="i-card" viewBox="0 0 24 24"><rect x="2.5" y="5" width="19" height="14" rx="3"/><path d="M2.5 10h19M6.5 15h4"/></symbol>
+    <symbol id="i-home" viewBox="0 0 24 24"><path d="M4 11l8-7 8 7v8a1 1 0 0 1-1 1h-4.5v-6h-5v6H5a1 1 0 0 1-1-1z"/></symbol>
+    <symbol id="i-pot" viewBox="0 0 24 24"><path d="M7.5 4h9M8.5 4v2.2A6.5 6.5 0 0 0 6 11.4V18a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2v-6.6a6.5 6.5 0 0 0-2.5-5.2V4M6 13h12"/></symbol>
+    <symbol id="i-scan" viewBox="0 0 24 24"><path d="M4 6v12M8 6v12M11.5 6v12M16 6v12M20 6v12"/></symbol>
+    <symbol id="i-chart" viewBox="0 0 24 24"><path d="M5 20v-9M12 20V4M19 20v-6"/></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 15V4M7.5 8.5L12 4l4.5 4.5M5 15v3a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3"/></symbol>
   </svg>
 
   <main id="app" tabindex="-1"></main>
   <div id="dock" hidden></div>
+  <nav id="tabs" hidden></nav>
   <p id="toast" role="status"></p>
   <input id="importFile" type="file" accept=".json,application/json" hidden>
+  <input id="bankFiles" type="file" accept=".csv,.pdf,.json,text/csv,application/pdf,application/json" multiple hidden>
 
   <dialog id="cardDialog" class="sheet" aria-labelledby="cardTitle">
     <form method="dialog" novalidate>
@@ -109,6 +119,72 @@
           <input type="checkbox" name="split" class="switch" role="switch"></label>
       </div>
       <p class="group-note" id="whoHint" data-en="With Split on, type an amount next to a name. The name with the check mark gets the rest.">Typ bij Verdelen een bedrag achter een naam. De naam met het vinkje krijgt de rest.</p>
+      <p class="error" role="alert"></p>
+    </form>
+  </dialog>
+
+  <dialog id="txDialog" class="sheet" aria-labelledby="txTitle">
+    <form method="dialog" novalidate>
+      <header class="sheet-bar">
+        <button type="button" class="text-button" data-action="close" data-en="Cancel">Annuleren</button>
+        <h2 id="txTitle" data-en="Sort">Indelen</h2>
+        <button class="text-button strong" value="ok" data-en="Save">Opslaan</button>
+      </header>
+      <div class="group" id="txFacts"></div>
+      <div class="group">
+        <label class="row" id="txAllRow"><span class="row-main" id="txAllLabel"></span>
+          <input type="checkbox" name="all" class="switch" role="switch"></label>
+        <label class="row" id="txFixedRow"><span class="row-main" data-en="Fixed cost, every month">Vaste last, elke maand</span>
+          <input type="checkbox" name="fixed" class="switch" role="switch"></label>
+      </div>
+      <div class="group" id="txCats"></div>
+      <p class="error" role="alert"></p>
+    </form>
+  </dialog>
+
+  <dialog id="catDialog" class="sheet" aria-labelledby="catTitle">
+    <form method="dialog" novalidate>
+      <header class="sheet-bar">
+        <button type="button" class="text-button" data-action="close" data-en="Cancel">Annuleren</button>
+        <h2 id="catTitle"></h2>
+        <button class="text-button strong" value="ok" data-en="Save">Opslaan</button>
+      </header>
+      <div class="group">
+        <label class="field"><span data-en="Name">Naam</span>
+          <input name="name" maxlength="30" autocomplete="off">
+        </label>
+        <label class="field"><span data-en="Counts as">Telt als</span>
+          <select name="kind">
+            <option value="out" data-en="Spending">Uitgave</option>
+            <option value="in" data-en="Income">Inkomen</option>
+            <option value="none" data-en="Does not count">Telt niet mee</option>
+          </select>
+          <svg class="icon" aria-hidden="true"><use href="#i-updown"/></svg>
+        </label>
+        <label class="field" id="catBudgetField"><span data-en="Amount per month (optional)">Bedrag per maand (optioneel)</span>
+          <input name="budget" inputmode="decimal" autocomplete="off" placeholder="0,00" data-en="0.00">
+        </label>
+      </div>
+      <p class="group-note" id="catHint"></p>
+      <p class="error" role="alert"></p>
+      <div class="group" id="catDeleteGroup">
+        <button type="button" class="row danger" data-action="deleteCat" data-en="Delete category">Categorie verwijderen</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="textDialog" class="sheet" aria-labelledby="textTitle">
+    <form method="dialog" novalidate>
+      <header class="sheet-bar">
+        <button type="button" class="text-button" data-action="close" data-en="Cancel">Annuleren</button>
+        <h2 id="textTitle"></h2>
+        <button class="text-button strong" value="ok" data-en="Save">Opslaan</button>
+      </header>
+      <div class="group">
+        <label class="field"><span id="textLabel"></span>
+          <input name="text" maxlength="30" autocomplete="off">
+        </label>
+      </div>
       <p class="error" role="alert"></p>
     </form>
   </dialog>

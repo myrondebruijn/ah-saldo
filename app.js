@@ -3,8 +3,13 @@ import {
   needsInstall, parseEuro, parseState, periodStart, settle, shareOut, shiftPeriod, sortCards, summarize,
   validCode, validNumber,
 } from './logic.js';
+import {
+  START_CATS, US, addFile, addStarter, balanceOn, byParty, cardsOn, decodeText, emptyBank, figures, fixedCosts, fixedSuggestions,
+  hasGap, inCategory, monthOf, parseBank, readCsv, readOpenbank, ruleKey, shiftMonth, sorter,
+} from './bank.js';
 
 const KEY = 'ah-saldo'; // the app's first name; changing this key would hide everything already saved
+const BANK_KEY = `${KEY}-bank`; // apart from the cards, so nothing in the bank data can ever make the cards unreadable
 // Dutch unless English was chosen on this phone. L(dutch, english) picks the text; switching reloads the app.
 const lang = localStorage.getItem(`${KEY}-lang`) === 'en' ? 'en' : 'nl';
 const L = (nl, en) => (lang === 'en' ? en : nl);
@@ -13,20 +18,27 @@ const formatEuro = (cents) => euroIn(cents, LOCALE);
 // AH's official "Saldochecker AH cadeaukaart" link, as published on ah.nl
 const CHECKER = 'https://service2.loyaltyinabox.com/CardBalanceChecker/2/paymentapi.aspx?cmd=showbalance&username=1379001&lang=nl-NL';
 const KIND = { start: L('Beginsaldo', 'Starting balance'), pay: L('Betaling', 'Payment'), correct: L('Correctie', 'Correction') };
-const US = 'Wij'; // who a purchase is for until someone else is chosen
 const SHOPS = ['AH', 'Plus', 'Jumbo', 'Dirk', 'Lidl', 'Anders'];
 // the default names are saved in Dutch, so a language switch leaves the data alone
-const ENGLISH_NAMES = new Map([[US, 'Us'], ['Anders', 'Other']]);
+const ENGLISH_NAMES = new Map([
+  [US, 'Us'], ['Anders', 'Other'], ['Boodschappen', 'Groceries'], ['Auto', 'Car'], ['Verzekering & bank', 'Insurance & bank'],
+  ['Reizen', 'Travel'], ['Voor anderen', 'For others'], ['Overig', 'Other'], ['Salaris', 'Salary'], ['Overig inkomen', 'Other income'],
+  ['Overboeking', 'Transfer'], ['Cadeaukaarten', 'Gift cards'],
+]);
 const shown = (name) => (lang === 'en' && ENGLISH_NAMES.get(name)) || name;
 const UNITS = { week: 'Week', month: L('Maand', 'Month'), year: L('Jaar', 'Year') };
 const SPAN = { week: 8, month: 6, year: 4 }; // how many periods the chart shows
+const STALE = 30; // days after which the overview asks for new bank files
+const START_IDS = new Set(START_CATS.map((cat) => cat.id));
+const KIND_ORDER = ['out', 'in', 'none'];
 
 const $ = (id) => document.getElementById(id);
 const app = $('app');
 const standalone = navigator.standalone || matchMedia('(display-mode: standalone)').matches;
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
 
-let state;
+let state; // the gift cards and what was paid with them
+let bank; // accounts, transactions, categories and rules
 
 // ---------- storage ----------
 
@@ -54,6 +66,28 @@ function save() {
   render();
 }
 
+function loadBank() {
+  const raw = localStorage.getItem(BANK_KEY);
+  if (!raw) return emptyBank();
+  try {
+    return parseBank(JSON.parse(raw));
+  } catch {
+    try { localStorage.setItem(`${BANK_KEY}-onleesbaar-${Date.now()}`, raw); } catch { /* no room for a second copy */ }
+    localStorage.removeItem(BANK_KEY);
+    toast(L('De bankgegevens zijn onleesbaar. Upload de bestanden opnieuw.', 'The bank data cannot be read. Upload the files again.'));
+    return emptyBank();
+  }
+}
+
+function saveBank() {
+  try {
+    localStorage.setItem(BANK_KEY, JSON.stringify(bank));
+  } catch {
+    toast(L('Opslaan is mislukt: de opslag van de telefoon is vol.', 'Saving failed: the storage of the phone is full.'));
+  }
+  render();
+}
+
 // ---------- building blocks ----------
 // Card numbers, codes, dates, ids and amounts are safe to put in HTML by construction: the forms and
 // parseState let nothing else in. Shop and person names are free text, so they always go through esc().
@@ -69,6 +103,25 @@ const euroInput = (cents) => L((cents / 100).toFixed(2).replace('.', ','), (cent
 const plural = (count, one, many) => `${count} ${count === 1 ? one : many}`;
 const ENTER_AMOUNT = L('Vul een bedrag in, bijvoorbeeld 12,50.', 'Enter an amount, for example 12.50.');
 const ENTER_DATE = L('Vul een geldige datum in.', 'Enter a valid date.');
+
+// months are 'YYYY-MM' and days 'YYYY-MM-DD', as in bank.js
+const thisMonth = () => monthOf(isoDate());
+const monthRange = (month) => [`${month}-01`, `${shiftMonth(month, 1)}-01`];
+const monthDate = (month) => new Date(Number(month.slice(0, 4)), Number(month.slice(5)) - 1, 1);
+const monthName = (month) => monthDate(month).toLocaleDateString(LOCALE, { month: 'long', year: 'numeric' });
+const monthShort = (month) => monthDate(month).toLocaleDateString(LOCALE, { month: 'short' }).replace('.', '');
+const dayShort = (day) => new Date(day).toLocaleDateString(LOCALE, { day: 'numeric', month: 'short', timeZone: 'UTC' }).replace('.', '');
+const average = (list) => (list.length ? Math.round(list.reduce((sum, each) => sum + each, 0) / list.length) : 0);
+
+const catById = (id) => bank.cats.find((cat) => cat.id === id);
+const catName = (id) => (catById(id) ? esc(shown(catById(id).name)) : L('Nog indelen', 'To sort'));
+const sortedCats = () => KIND_ORDER.flatMap((kind) => bank.cats.filter((cat) => cat.kind === kind));
+const accountById = (id) => bank.accounts.find((account) => account.id === id);
+const monthFigures = (month) => figures(bank, state.purchases, ...monthRange(month));
+const cardTotal = () => state.cards.reduce((sum, card) => sum + Math.max(balance(card), 0), 0);
+
+// What the screens of the bank side are looking at. It lasts until the app is closed.
+const view = { month: thisMonth(), unit: 'month', worth: '', query: '', cat: 'all', acc: 'all', rows: 60 };
 
 const cardById = (id) => state.cards.find((card) => card.id === id);
 const purchaseById = (id) => state.purchases.find((purchase) => purchase.id === id);
@@ -129,14 +182,20 @@ const paidWith = (cards, total) => `
     <li class="row"><span class="row-main">${L('Pin', 'Debit card')}</span>${formatEuro(total - cards)}</li>
   </ul>`;
 
-// ---------- home, card, archive ----------
+// ---------- cards, card, archive ----------
 
-function homeScreen() {
+const backupNotice = () => (state.needsBackup ? `
+  <div class="group">
+    <p class="row notice">${icon('warn')}<span class="row-main">${L('Er zijn nieuwe gegevens zonder back&#8209;up.', 'There is new data without a backup.')}</span></p>
+    <button class="row tint" data-action="export">${L('Back-up maken', 'Make a backup')}</button>
+  </div>` : '');
+
+// The root of the Betalen tab: every card with money on it. The tab itself starts a payment.
+function cardsScreen() {
   const active = sortCards(state.cards.filter((card) => balance(card) > 0));
   const spent = state.cards.length - active.length;
-  const total = active.reduce((sum, card) => sum + balance(card), 0);
   const month = periodStart('month', new Date());
-  const thisMonth = summarize(state.purchases, month, shiftPeriod('month', month, 1)).total;
+  const thisMonthPaid = summarize(state.purchases, month, shiftPeriod('month', month, 1)).cards;
   // the first card is the one to use next, so it alone gets the blue pass
   const passes = active.map((card, index) => `
     <li><a class="pass${index ? '' : ' next'}" href="#/kaart/${card.id}">
@@ -147,47 +206,542 @@ function homeScreen() {
   return {
     html: `
       <header class="large-title">
-        <h1>Kassa</h1>
+        <h1>${L('Kaarten', 'Cards')}</h1>
         <button class="round" data-action="add" aria-label="${L('Kaart toevoegen', 'Add card')}">${icon('plus')}</button>
       </header>
       <section class="summary">
         <p class="footnote">${L('Totaal saldo', 'Total balance')}</p>
-        <p class="total">${formatEuro(total)}</p>
+        <p class="total">${formatEuro(cardTotal())}</p>
         <p class="footnote">${L(plural(active.length, 'kaart', 'kaarten'), plural(active.length, 'card', 'cards'))}</p>
       </section>
-      ${state.needsBackup ? `
-        <div class="group">
-          <p class="row notice">${icon('warn')}<span class="row-main">${L('Je hebt nieuwe kaarten zonder back&#8209;up.', 'You have new cards without a backup.')}</span></p>
-          <button class="row tint" data-action="export">${L('Back-up maken', 'Make a backup')}</button>
-        </div>` : ''}
+      ${backupNotice()}
       <h2 class="section">${L('Kaarten', 'Cards')}</h2>
       ${active.length
         ? `<ul class="passes">${passes}</ul>`
-        : blank(L('Nog geen kaarten', 'No cards yet'), L('Voeg je eerste AH cadeaukaart toe.', 'Add your first AH gift card.'))}
+        : blank(L('Nog geen kaarten', 'No cards yet'), L('Voeg je eerste AH cadeaukaart toe met de plus.', 'Add your first AH gift card with the plus.'))}
       <div class="group">
         <a class="row" href="#/uitgaven">
-          <span class="row-main">${L('Uitgaven <small>Deze maand</small>', 'Spending <small>This month</small>')}</span> ${formatEuro(thisMonth)}${icon('next')}</a>
+          <span class="row-main">${L('Bij de kassa <small>Met kaarten betaald deze maand</small>', 'At the till <small>Paid with cards this month</small>')}</span> ${formatEuro(thisMonthPaid)}${icon('next')}</a>
         ${spent ? `<a class="row" href="#/archief"><span class="row-main">${L('Lege kaarten', 'Empty cards')}</span> ${spent}${icon('next')}</a>` : ''}
+      </div>`,
+  };
+}
+
+// ---------- charts ----------
+
+// One column of a chart, `height` of 92 units tall: rounded at the top, square on the baseline; too short to round below 8
+const columnShape = (x, width, height, name = '') => (height >= 8
+  ? `<path class="${name}" d="M${x} 92V${96 - height}a4 4 0 0 1 4-4h${width - 8}a4 4 0 0 1 4 4V92z"/>`
+  : `<rect class="${name}" x="${x}" y="${92 - height}" width="${width}" height="${height}"/>`);
+const columnHeight = (total, most) => (most > 0 && total > 0 ? Math.max(Math.round(total / most * 88), 2) : 0);
+
+// Columns for a run of periods: the chosen one in blue, the others grey. A tap on a column chooses it.
+// periods: [{ id, name, short, total, chosen }]
+function columnChart(periods, action) {
+  const most = Math.max(0, ...periods.map((period) => period.total));
+  return `<ul class="columns">${periods.map(({ id, name, short, total, chosen }) => {
+    const label = `${name}: ${formatEuro(total)}`;
+    return `
+      <li><button class="column" data-action="${action}" data-id="${id}" aria-pressed="${chosen}" aria-label="${label}" title="${label}">
+        <svg viewBox="0 0 24 92" aria-hidden="true">${columnShape(0, 24, columnHeight(total, most))}</svg>
+        <span>${short}</span>
+      </button></li>`;
+  }).join('')}</ul>`;
+}
+
+// Two columns per month, money in beside money out, on one scale. The chosen month stands out; a tap chooses another.
+function flowChart(months, chosen) {
+  const sums = months.map((month) => ({ month, ...monthFigures(month) }));
+  const most = Math.max(0, ...sums.flatMap((sum) => [sum.income, sum.spending]));
+  return `
+    <ul class="columns flow">${sums.map(({ month, income, spending }) => {
+      const label = `${monthName(month)}: ${L('in', 'in')} ${formatEuro(income)}, ${L('uit', 'out')} ${formatEuro(spending)}`;
+      return `
+        <li><button class="column" data-action="pickMonth" data-id="${month}" aria-pressed="${month === chosen}" aria-label="${label}" title="${label}">
+          <svg viewBox="0 0 24 92" preserveAspectRatio="none" aria-hidden="true">
+            ${columnShape(0, 11, columnHeight(income, most), 'in')}${columnShape(13, 11, columnHeight(spending, most), 'out')}</svg>
+          <span>${monthShort(month)}</span>
+        </button></li>`;
+    }).join('')}</ul>
+    <p class="legend"><span><i class="key in"></i>${L('In', 'In')}</span><span><i class="key out"></i>${L('Uit', 'Out')}</span></p>`;
+}
+
+// A line through one amount per month. points: [{ id, name, cents }]; a tap on a month chooses it.
+function lineChart(points, chosen, action) {
+  const low = Math.min(...points.map((point) => point.cents));
+  const high = Math.max(...points.map((point) => point.cents));
+  const step = points.length > 1 ? 284 / (points.length - 1) : 0;
+  const place = points.map((point, index) => ({
+    ...point,
+    x: points.length > 1 ? 8 + index * step : 150,
+    y: high > low ? 86 - (point.cents - low) / (high - low) * 70 : 51,
+  }));
+  const path = place.map((point) => `${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(' ');
+  const dot = place.find((point) => point.id === chosen) ?? place.at(-1);
+  return `
+    <svg class="line" viewBox="0 0 300 100" role="group" aria-label="${L('Verloop per maand', 'Course per month')}">
+      ${place.length > 1 ? `<polygon class="area" points="${place[0].x},96 ${path} ${place.at(-1).x},96"/><polyline class="stroke" points="${path}"/>` : ''}
+      <line class="rule" x1="${dot.x.toFixed(1)}" x2="${dot.x.toFixed(1)}" y1="6" y2="96"/>
+      <circle class="dot" cx="${dot.x.toFixed(1)}" cy="${dot.y.toFixed(1)}" r="5"/>
+      ${place.map((point) => `<rect class="hit" x="${(point.x - (step || 284) / 2).toFixed(1)}" y="0" width="${(step || 284).toFixed(1)}" height="100"
+        role="button" tabindex="0" data-action="${action}" data-id="${point.id}" aria-pressed="${point === dot}"
+        aria-label="${point.name}: ${formatEuro(point.cents)}"><title>${point.name}: ${formatEuro(point.cents)}</title></rect>`).join('')}
+    </svg>
+    <p class="axis"><span>${place[0].name}</span><span>${place.length > 1 ? place.at(-1).name : ''}</span></p>`;
+}
+
+// A bar for a share of something: `over` colours it, `pace` (0-1) marks where today is in the month.
+const meterBar = (share, { over = false, pace = null } = {}) => `
+  <svg class="meter${over ? ' over' : ''}" aria-hidden="true"><rect class="track" width="100%" height="100%" rx="4"/>
+    <rect width="${(Math.max(0, Math.min(share, 1)) * 100).toFixed(1)}%" height="100%" rx="4"/>
+    ${pace === null ? '' : `<rect class="pace" x="${(pace * 100).toFixed(1)}%" width="2" height="100%"/>`}</svg>`;
+
+// ---------- the bank side: overview ----------
+
+// the row of a transaction; a tap opens the sheet that sorts it
+function txRow(tx, catOf, withAccount = true) {
+  const cat = catOf(tx);
+  return `
+    <li><button class="row tx" data-action="tx" data-id="${esc(tx.id)}">
+      <span class="row-main">${esc(tx.name)} <small>${dayShort(tx.date)} · <span${cat ? '' : ' class="todo"'}>${catName(cat)}</span>${
+        withAccount ? ` · ${esc(accountById(tx.acc)?.name ?? '')}` : ''}</small></span>
+      <span class="amount${tx.cents > 0 ? ' plus' : ''}">${signed(tx.cents)}</span>
+    </button></li>`;
+}
+
+// A pot: a category with an amount per month, what was spent of it, and for the running month where today is.
+function potRow(cat, spent, month) {
+  const running = month === thisMonth();
+  const days = new Date(Number(month.slice(0, 4)), Number(month.slice(5)), 0).getDate();
+  const day = new Date().getDate();
+  const left = cat.budget - spent;
+  return `
+    <li><a class="row meter-row" href="#/categorie/${cat.id}">
+      <span class="row-main">${esc(shown(cat.name))} <small>${formatEuro(spent)} ${L('van', 'of')} ${formatEuro(cat.budget)}${running ? ` · ${L('dag', 'day')} ${day} ${L('van', 'of')} ${days}` : ''}</small></span>
+      <span class="${left < 0 ? 'over-text' : ''}">${left < 0 ? L(`${formatEuro(-left)} erover`, `${formatEuro(-left)} over`) : L(`nog ${formatEuro(left)}`, `${formatEuro(left)} left`)}</span>
+      ${meterBar(spent / cat.budget, { over: left < 0, pace: running ? day / days : null })}
+    </a></li>`;
+}
+
+const pots = () => bank.cats.filter((cat) => cat.kind === 'out' && cat.budget);
+const openCount = () => inCategory(bank, '', '', '9999').length;
+
+// "9 van 12 betaald", for the fixed costs of a month
+function fixedSummary(month) {
+  const costs = fixedCosts(bank, month);
+  const paid = costs.filter((cost) => cost.paid).length;
+  return { costs, text: L(`${paid} van ${costs.length} betaald`, `${paid} of ${costs.length} paid`), total: costs.reduce((sum, cost) => sum + cost.paid, 0) };
+}
+
+function accountRows(date) {
+  return bank.accounts.map((account) => `
+    <li><button class="row" data-action="renameAccount" data-id="${esc(account.id)}">
+      <span class="row-main">${esc(account.name)} <small>${L('t/m', 'up to')} ${dayShort(account.through)} · ${L('geüpload', 'uploaded')} ${dayShort(isoDate(new Date(account.uploaded)))}</small></span>
+      <span class="amount">${formatEuro(balanceOn(bank, account, date))}</span>
+    </button></li>`).join('');
+}
+
+const worthOn = (date) => bank.accounts.reduce((sum, account) => sum + balanceOn(bank, account, date), 0) + cardsOn(state.cards, date);
+
+const uploadRow = () => `<button class="row tint" data-action="upload">${icon('upload')}<span class="row-main">${L('Bankbestanden uploaden', 'Upload bank files')}</span></button>`;
+
+function overviewScreen() {
+  const month = thisMonth();
+  const now = monthFigures(month);
+  const today = isoDate();
+  const oldest = Math.max(0, ...bank.accounts.map((account) => daysLeft(today, isoDate(new Date(account.uploaded)))));
+  const fixed = fixedSummary(month);
+  const suggested = fixedSuggestions(bank, month).length;
+  const open = openCount();
+  const gaps = bank.accounts.filter((account) => hasGap(bank, account));
+  const title = `
+    <header class="large-title">
+      <h1>Kassa</h1>
+      <a class="round plain" href="#/meer" aria-label="${L('Instellingen', 'Settings')}">${icon('gear')}</a>
+    </header>`;
+  const cards = `
+    <a class="row" href="#/kaarten"><span class="row-main">${L('Cadeaukaarten', 'Gift cards')}</span>
+      <span class="amount">${formatEuro(cardTotal())}</span>${icon('next')}</a>`;
+  if (!bank.accounts.length) {
+    return {
+      html: `${title}
+        ${backupNotice()}
+        ${blank(L('Nog geen bankgegevens', 'No bank data yet'), L('Upload het CSV-bestand van je Rabo-rekening of creditcard, of het PDF-afschrift van Openbank.',
+          'Upload the CSV file of your Rabo account or credit card, or the PDF statement from Openbank.'))}
+        <div class="group">${uploadRow()}</div>
+        <div class="group">${cards}</div>`,
+    };
+  }
+  return {
+    html: `${title}
+      <a class="summary" href="#/inzicht">
+        <p class="footnote">${L('Uitgegeven in', 'Spent in')} ${monthName(month)}</p>
+        <p class="total">${formatEuro(now.spending)}</p>
+        <p class="footnote">${L('Binnengekomen', 'Came in')} ${formatEuro(now.income)} · ${now.income >= now.spending
+          ? `${L('over', 'left')} ${formatEuro(now.income - now.spending)}` : `${L('tekort', 'short')} ${formatEuro(now.spending - now.income)}`}</p>
+      </a>
+      ${oldest > STALE ? `
+        <div class="group">
+          <p class="row notice">${icon('warn')}<span class="row-main">${L(`De laatste upload is ${oldest} dagen oud. Tijd voor nieuwe bestanden.`,
+            `The last upload is ${oldest} days old. Time for new files.`)}</span></p>
+          ${uploadRow()}
+        </div>` : ''}
+      ${gaps.length ? `
+        <div class="group"><p class="row notice">${icon('warn')}<span class="row-main">${L('Er ontbreken transacties bij', 'Transactions are missing for')}
+          ${gaps.map((account) => esc(account.name)).join(', ')}. ${L('Upload ook de periode ertussen.', 'Upload the period in between as well.')}</span></p></div>` : ''}
+      ${backupNotice()}
+      <h2 class="section">${L('Potjes', 'Pots')}</h2>
+      <ul class="group">
+        ${pots().map((cat) => potRow(cat, now.byCat.get(cat.id) ?? 0, month)).join('')
+          || `<li><a class="row tint" href="#/potjes">${L('Kies een bedrag per maand voor een potje', 'Choose an amount per month for a pot')}</a></li>`}
+      </ul>
+      <div class="group">
+        ${open ? `<a class="row" href="#/categorie/open"><span class="row-main">${L('Nog indelen', 'To sort')}</span>
+          <span class="amount">${L(plural(open, 'transactie', 'transacties'), plural(open, 'transaction', 'transactions'))}</span>${icon('next')}</a>` : ''}
+        <a class="row" href="#/vast"><span class="row-main">${L('Vaste lasten', 'Fixed costs')}
+          <small>${fixed.costs.length ? fixed.text : suggested ? L(plural(suggested, 'voorstel', 'voorstellen'), plural(suggested, 'suggestion', 'suggestions')) : L('Nog geen', 'None yet')}</small></span>
+          <span class="amount">${fixed.costs.length ? formatEuro(fixed.total) : ''}</span>${icon('next')}</a>
       </div>
+      <h2 class="section">${L('Rekeningen', 'Accounts')}</h2>
+      <ul class="group">
+        ${accountRows()}
+        <li>${cards}</li>
+        <li class="row"><strong class="row-main">${L('Samen', 'Together')}</strong><strong class="amount">${formatEuro(worthOn('9999'))}</strong></li>
+      </ul>
+      <div class="group">${uploadRow()}</div>`,
+  };
+}
+
+// ---------- pots, a category, fixed costs ----------
+
+// previous and next month (or year) around the name of the one on screen
+function stepper(name, atEnd) {
+  return `
+    <div class="stepper">
+      <button data-action="monthStep" data-by="-1" aria-label="${L('Vorige', 'Previous')}">${icon('back')}</button>
+      <h2>${name}</h2>
+      <button data-action="monthStep" data-by="1" aria-label="${L('Volgende', 'Next')}"${atEnd ? ' disabled' : ''}>${icon('next')}</button>
+    </div>`;
+}
+const monthStepper = () => stepper(monthName(view.month), view.month >= thisMonth());
+
+function potsScreen() {
+  const now = monthFigures(view.month);
+  const spending = bank.cats.filter((cat) => cat.kind === 'out');
+  const others = spending.filter((cat) => !cat.budget).map((cat) => [cat, now.byCat.get(cat.id) ?? 0]).sort((a, b) => b[1] - a[1]);
+  const open = now.byCat.get('') ?? 0;
+  const fixed = fixedSummary(view.month);
+  return {
+    html: `
+      <header class="large-title"><h1>${L('Potjes', 'Pots')}</h1></header>
+      <section class="summary period">
+        ${monthStepper()}
+        <p class="total">${formatEuro(now.spending)}</p>
+        <p class="footnote center">${L('uitgegeven', 'spent')}</p>
+      </section>
+      <h2 class="section">${L('Potjes', 'Pots')}</h2>
+      ${pots().length ? `<ul class="group">${pots().map((cat) => potRow(cat, now.byCat.get(cat.id) ?? 0, view.month)).join('')}</ul>`
+        : `<p class="group-note">${L('Een potje is een categorie met een bedrag per maand. Tik hieronder op een categorie en kies Bewerken om er een bedrag aan te geven.',
+          'A pot is a category with an amount per month. Tap a category below and choose Edit to give it one.')}</p>`}
+      <h2 class="section">${L('Zonder maandbedrag', 'Without a monthly amount')}</h2>
+      <ul class="group">
+        ${others.map(([cat, cents]) => `
+          <li><a class="row" href="#/categorie/${cat.id}"><span class="row-main">${esc(shown(cat.name))}</span>
+            <span class="amount">${formatEuro(cents)}</span>${icon('next')}</a></li>`).join('')}
+        ${open ? `<li><a class="row" href="#/categorie/open"><span class="row-main todo">${L('Nog indelen', 'To sort')}</span>
+          <span class="amount">${formatEuro(open)}</span>${icon('next')}</a></li>` : ''}
+      </ul>
+      <div class="group">
+        <a class="row" href="#/vast"><span class="row-main">${L('Vaste lasten', 'Fixed costs')} <small>${fixed.costs.length ? fixed.text : L('Nog geen', 'None yet')}</small></span>
+          <span class="amount">${fixed.costs.length ? formatEuro(fixed.total) : ''}</span>${icon('next')}</a>
+      </div>`,
+  };
+}
+
+const backButton = () => `<button class="back" data-action="back">${icon('back')}${L('Terug', 'Back')}</button>`;
+
+// One category in one month: what it cost, the months before, who was paid, and every transaction.
+// The id 'open' stands for everything that still has to be sorted, of all months together.
+function categoryScreen(id) {
+  const cat = catById(id);
+  if (!cat && id !== 'open') return potsScreen();
+  const [from, to] = cat ? monthRange(view.month) : ['', '9999'];
+  const txs = inCategory(bank, cat?.id ?? '', from, to);
+  const catOf = sorter(bank);
+  const sign = cat?.kind === 'in' ? 1 : -1; // spending is shown as a positive amount
+  const fromCards = cat ? figures({ ...bank, txs: [] }, state.purchases, from, to).byCat.get(cat.id) ?? 0 : 0;
+  const total = cat?.kind === 'none' ? txs.reduce((sum, tx) => sum + tx.cents, 0) : (monthFigures(view.month).byCat.get(cat?.id ?? '') ?? 0);
+  const parties = byParty(txs);
+  const most = Math.max(1, ...parties.map((party) => Math.abs(party.cents)), fromCards);
+  const months = Array.from({ length: 6 }, (unused, index) => shiftMonth(view.month >= shiftMonth(thisMonth(), -5) ? thisMonth() : view.month, index - 5));
+  const shownRows = txs.slice(0, view.rows);
+  return {
+    html: `
+      <header class="navbar">
+        ${backButton()}
+        <h1>${catName(cat?.id)}</h1>
+        ${cat ? `<button class="text-button" data-action="editCat" data-id="${cat.id}">${L('Bewerken', 'Edit')}</button>` : '<span></span>'}
+      </header>
+      ${cat ? `
+        <section class="summary period">
+          ${monthStepper()}
+          <p class="total">${cat.kind === 'none' ? signed(total) : formatEuro(total)}</p>
+          ${cat.budget ? `<ul class="plain">${potRow(cat, total, view.month).replace('<a class="row meter-row" href', '<a class="row meter-row bare" href')}</ul>` : ''}
+          ${cat.kind === 'none' ? '' : columnChart(months.map((month) => ({
+            id: month, name: monthName(month), short: monthShort(month), total: Math.max(0, monthFigures(month).byCat.get(cat.id) ?? 0), chosen: month === view.month,
+          })), 'pickMonth')}
+        </section>`
+      : `<p class="group-note">${L('Tik op een naam en kies een categorie. Alles van die naam gaat dan mee, ook wat later binnenkomt.',
+        'Tap a name and choose a category. Everything from that name follows, including what comes in later.')}</p>`}
+      ${parties.length || fromCards ? `
+        <h2 class="section">${cat ? L('Bij wie', 'Where') : L('Per naam, grootste eerst', 'Per name, largest first')}</h2>
+        <ul class="group">
+          ${fromCards ? `<li><a class="row meter-row" href="#/uitgaven"><span class="row-main">${L('AH met cadeaukaarten', 'AH with gift cards')}</span>
+            <span>${formatEuro(fromCards)}</span>${meterBar(fromCards / most)}</a></li>` : ''}
+          ${parties.slice(0, view.rows).map((party) => `
+            <li><button class="row meter-row" data-action="sortParty" data-id="${esc(txs.find((tx) => ruleKey(tx.name) === party.key).id)}">
+              <span class="row-main">${esc(party.name)}${party.count > 1 ? ` <small class="inline">${party.count}×</small>` : ''}</span>
+              <span class="${cat ? '' : party.cents > 0 ? 'plus' : ''}">${cat && cat.kind !== 'none' ? formatEuro(sign * party.cents) : signed(party.cents)}</span>
+              ${meterBar(Math.abs(party.cents) / most)}
+            </button></li>`).join('')}
+        </ul>
+        <h2 class="section">${L('Transacties', 'Transactions')}</h2>
+        <ul class="group">${shownRows.map((tx) => txRow(tx, catOf)).join('')}</ul>
+        ${txs.length > shownRows.length ? `<div class="group"><button class="row tint" data-action="moreRows">${L('Toon meer', 'Show more')}</button></div>` : ''}`
+      : blank(cat ? L('Niets in deze maand', 'Nothing this month') : L('Alles is ingedeeld', 'Everything is sorted'))}`,
+  };
+}
+
+function fixedScreen() {
+  const { costs, total } = fixedSummary(view.month);
+  const waiting = costs.filter((cost) => !cost.paid).reduce((sum, cost) => sum + cost.expected, 0);
+  const catOf = sorter(bank);
+  const latest = (key) => bank.txs.filter((tx) => ruleKey(tx.name) === key).sort((a, b) => b.date.localeCompare(a.date))[0];
+  const suggestions = fixedSuggestions(bank, thisMonth());
+  const status = (cost) => (!cost.paid ? L('Nog niet betaald', 'Not paid yet')
+    : cost.expected && cost.paid !== cost.expected ? L(`Betaald · de keer ervoor ${formatEuro(cost.expected)}`, `Paid · last time ${formatEuro(cost.expected)}`)
+    : L('Betaald', 'Paid'));
+  return {
+    html: `
+      <header class="navbar">${backButton()}<h1>${L('Vaste lasten', 'Fixed costs')}</h1><span></span></header>
+      <section class="summary period">
+        ${monthStepper()}
+        <p class="total">${formatEuro(total)}</p>
+        <p class="footnote center">${L('betaald', 'paid')}${waiting ? ` · ${L('nog verwacht', 'still expected')} ${formatEuro(waiting)}` : ''}</p>
+      </section>
+      ${costs.length ? `
+        <ul class="group">${costs.map((cost) => `
+          <li><button class="row" data-action="tx" data-id="${esc(latest(cost.key).id)}">
+            <span class="row-main">${esc(cost.name)} <small>${status(cost)} · ${catName(catOf(latest(cost.key)))}</small></span>
+            <span class="amount${cost.paid ? '' : ' quiet'}">${formatEuro(cost.paid || cost.expected)}</span>
+          </button></li>`).join('')}</ul>`
+      : `<p class="group-note">${L('Een vaste last is iets dat je elke maand betaalt. Kies hieronder Ja bij een voorstel, of zet bij een transactie de schakelaar Vaste last aan.',
+        'A fixed cost is something you pay every month. Choose Yes for a suggestion below, or switch on Fixed cost on a transaction.')}</p>`}
+      ${suggestions.length ? `
+        <h2 class="section">${L('Voorstellen', 'Suggestions')}</h2>
+        <ul class="group">${suggestions.map((each) => `
+          <li class="row">
+            <span class="row-main">${esc(each.name)} <small>${formatEuro(each.cents)} ${L('per maand', 'a month')}</small></span>
+            <button class="text-button" data-action="fixedNo" data-id="${esc(each.key)}">${L('Nee', 'No')}</button>
+            <button class="text-button strong" data-action="fixedYes" data-id="${esc(each.key)}">${L('Ja', 'Yes')}</button>
+          </li>`).join('')}</ul>
+        <p class="group-note">${L('Deze namen zijn de laatste drie maanden elke maand één keer betaald.', 'These names were paid once in each of the last three months.')}</p>` : ''}`,
+  };
+}
+
+// ---------- insight ----------
+
+const yearOf = (month) => month.slice(0, 4);
+// the months a chart shows: the twelve up to now (or up to the chosen month when that is older), or the chosen year
+function chartMonths() {
+  const first = bank.since ? monthOf(bank.since) : '';
+  const end = view.month >= shiftMonth(thisMonth(), -11) ? thisMonth() : view.month;
+  const all = view.unit === 'year'
+    ? Array.from({ length: 12 }, (unused, index) => `${yearOf(view.month)}-${String(index + 1).padStart(2, '0')}`)
+    : Array.from({ length: 12 }, (unused, index) => shiftMonth(end, index - 11));
+  return all.filter((month) => month >= first && month <= thisMonth());
+}
+
+function insightScreen() {
+  const yearly = view.unit === 'year';
+  const year = yearOf(view.month);
+  const [from, to] = yearly ? [`${year}-01-01`, `${Number(year) + 1}-01-01`] : monthRange(view.month);
+  const now = figures(bank, state.purchases, from, to);
+  const left = now.income - now.spending;
+  const kinds = new Map(bank.cats.map((cat) => [cat.id, cat.kind]));
+  const spent = [...now.byCat].filter(([id, cents]) => (kinds.get(id) ?? (cents > 0 ? 'out' : '')) === 'out' && cents > 0).sort((a, b) => b[1] - a[1]);
+  const earned = [...now.byCat].filter(([id]) => kinds.get(id) === 'in').sort((a, b) => b[1] - a[1]);
+  const before = [1, 2, 3].map((back) => monthFigures(shiftMonth(view.month, -back)).spending);
+  const versus = (label, detail, other) => (other ? `
+    <li class="row"><span class="row-main">${label} <small>${detail}</small></span>
+      <span class="amount">${formatEuro(Math.abs(now.spending - other))} ${now.spending > other ? L('meer', 'more') : L('minder', 'less')}</span></li>` : '');
+  // net worth at the end of each month; the running month stands at today
+  const points = chartMonths().length ? (yearly ? chartMonths() : chartMonths()).map((month) => ({
+    id: month, name: monthShort(month), cents: worthOn(month === thisMonth() ? '9999' : `${month}-31`),
+  })) : [];
+  const worthMonth = points.some((point) => point.id === view.worth) ? view.worth : points.at(-1)?.id;
+  const fixed = fixedSummary(view.month);
+  if (!bank.accounts.length) {
+    return { html: `<header class="large-title"><h1>${L('Inzicht', 'Insight')}</h1></header>
+      ${blank(L('Nog niets te zien', 'Nothing to see yet'), L('Upload eerst je bankbestanden op Overzicht.', 'Upload your bank files on Overview first.'))}` };
+  }
+  return {
+    html: `
+      <header class="large-title"><h1>${L('Inzicht', 'Insight')}</h1></header>
+      <div class="segments" role="group" aria-label="${L('Periode', 'Period')}">
+        <button data-action="unit" data-id="month" aria-pressed="${!yearly}">${L('Maand', 'Month')}</button>
+        <button data-action="unit" data-id="year" aria-pressed="${yearly}">${L('Jaar', 'Year')}</button>
+      </div>
+      <section class="summary period">
+        ${yearly ? stepper(year, year >= yearOf(thisMonth())) : monthStepper()}
+        <dl class="trio">
+          <div><dt>${L('In', 'In')}</dt><dd>${formatEuro(now.income)}</dd></div>
+          <div><dt>${L('Uit', 'Out')}</dt><dd>${formatEuro(now.spending)}</dd></div>
+          <div><dt>${left < 0 ? L('Tekort', 'Short') : L('Over', 'Left')}</dt><dd class="${left < 0 ? 'over-text' : ''}">${formatEuro(Math.abs(left))}</dd></div>
+        </dl>
+        ${now.income > 0 && left > 0 ? `<p class="footnote center">${Math.round(left / now.income * 100)}% ${L('van wat binnenkwam bleef over', 'of what came in was left')}</p>` : ''}
+        ${flowChart(chartMonths(), yearly ? '' : view.month)}
+      </section>
+      ${yearly ? '' : `<ul class="group">
+        ${versus(L('Uit, tegen de maand ervoor', 'Out, against the month before'), monthName(shiftMonth(view.month, -1)), before[0])}
+        ${versus(L('Uit, tegen het gemiddelde', 'Out, against the average'), L('van de drie maanden ervoor', 'of the three months before'), before.every(Boolean) ? average(before) : 0)}
+      </ul>`}
+      ${spent.length ? `
+        <h2 class="section">${L('Uitgaven per categorie', 'Spending per category')}</h2>
+        <ul class="group">${spent.map(([id, cents]) => `
+          <li><a class="row meter-row" href="#/categorie/${id || 'open'}">
+            <span class="row-main${id ? '' : ' todo'}">${catName(id)}</span>
+            <span>${formatEuro(cents)} <small class="inline">${Math.round(cents / now.spending * 100)}%</small></span>
+            ${meterBar(cents / spent[0][1])}
+          </a></li>`).join('')}</ul>` : ''}
+      ${earned.length ? `
+        <h2 class="section">${L('Inkomen', 'Income')}</h2>
+        <ul class="group">${earned.map(([id, cents]) => `
+          <li><a class="row" href="#/categorie/${id}"><span class="row-main">${catName(id)}</span><span class="amount">${formatEuro(cents)}</span>${icon('next')}</a></li>`).join('')}</ul>` : ''}
+      ${yearly || !fixed.costs.length ? '' : `
+        <div class="group"><a class="row" href="#/vast"><span class="row-main">${L('Vaste lasten', 'Fixed costs')} <small>${fixed.text}</small></span>
+          <span class="amount">${formatEuro(fixed.total)}</span>${icon('next')}</a></div>`}
+      ${points.length ? `
+        <h2 class="section">${L('Vermogen', 'Net worth')}</h2>
+        <section class="summary worth">
+          <p class="footnote">${worthMonth === thisMonth() ? L('Nu', 'Now') : `${L('Eind', 'End of')} ${monthName(worthMonth)}`}</p>
+          <p class="total small">${formatEuro(points.find((point) => point.id === worthMonth).cents)}</p>
+          ${lineChart(points, worthMonth, 'pickWorth')}
+        </section>
+        <ul class="group">
+          ${bank.accounts.map((account) => `<li class="row"><span class="row-main">${esc(account.name)}</span>
+            <span class="amount">${formatEuro(balanceOn(bank, account, worthMonth === thisMonth() ? '9999' : `${worthMonth}-31`))}</span></li>`).join('')}
+          <li class="row"><span class="row-main">${L('Cadeaukaarten', 'Gift cards')}</span>
+            <span class="amount">${formatEuro(cardsOn(state.cards, worthMonth === thisMonth() ? '9999' : `${worthMonth}-31`))}</span></li>
+        </ul>` : ''}`,
+  };
+}
+
+// ---------- transactions ----------
+
+// The list under the search field and the two pick lists, newest first, a heading per month.
+function txList() {
+  const catOf = sorter(bank);
+  const words = view.query.trim().toLowerCase();
+  const wanted = view.cat === 'open' ? '' : view.cat;
+  const found = bank.txs.filter((tx) => (view.acc === 'all' || tx.acc === view.acc)
+    && (view.cat === 'all' || catOf(tx) === wanted)
+    && (!words || `${tx.name} ${tx.text} ${euroInput(Math.abs(tx.cents))}`.toLowerCase().includes(words)))
+    .sort((a, b) => b.date.localeCompare(a.date));
+  if (!found.length) return blank(L('Niets gevonden', 'Nothing found'));
+  const months = new Map();
+  for (const tx of found.slice(0, view.rows)) months.set(monthOf(tx.date), [...(months.get(monthOf(tx.date)) ?? []), tx]);
+  return `${[...months].map(([month, txs]) => `
+    <h2 class="section">${monthName(month)}</h2>
+    <ul class="group">${txs.map((tx) => txRow(tx, catOf, view.acc === 'all')).join('')}</ul>`).join('')}
+    ${found.length > view.rows ? `<div class="group"><button class="row tint" data-action="moreRows">${L('Toon meer', 'Show more')} (${found.length - view.rows})</button></div>` : ''}`;
+}
+
+function transactionsScreen() {
+  const option = (value, label, chosen) => `<option value="${esc(value)}"${value === chosen ? ' selected' : ''}>${label}</option>`;
+  if (!bank.txs.length) {
+    return { html: `<header class="large-title"><h1>${L('Transacties', 'Transactions')}</h1></header>
+      ${blank(L('Nog geen transacties', 'No transactions yet'), L('Upload eerst je bankbestanden op Overzicht.', 'Upload your bank files on Overview first.'))}` };
+  }
+  return {
+    html: `
+      <header class="large-title"><h1>${L('Transacties', 'Transactions')}</h1></header>
+      <label class="search">${icon('search')}
+        <input id="txSearch" type="search" enterkeyhint="search" autocomplete="off" value="${esc(view.query)}"
+          placeholder="${L('Zoek op naam, omschrijving of bedrag', 'Search name, description or amount')}" aria-label="${L('Zoeken', 'Search')}">
+      </label>
+      <div class="filters">
+        <label><select data-filter="cat" aria-label="${L('Categorie', 'Category')}">
+          ${option('all', L('Alle categorieën', 'All categories'), view.cat)}${option('open', L('Nog indelen', 'To sort'), view.cat)}
+          ${sortedCats().map((cat) => option(cat.id, esc(shown(cat.name)), view.cat)).join('')}</select>${icon('updown')}</label>
+        <label><select data-filter="acc" aria-label="${L('Rekening', 'Account')}">
+          ${option('all', L('Alle rekeningen', 'All accounts'), view.acc)}
+          ${bank.accounts.map((account) => option(account.id, esc(account.name), view.acc)).join('')}</select>${icon('updown')}</label>
+      </div>
+      <div id="txList">${txList()}</div>`,
+  };
+}
+
+// ---------- settings ----------
+
+function settingsScreen() {
+  return {
+    html: `
+      <header class="navbar">
+        <a class="back" href="#/">${icon('back')}${L('Overzicht', 'Overview')}</a>
+        <h1>${L('Instellingen', 'Settings')}</h1>
+        <span></span>
+      </header>
+      <h2 class="section">${L('Bankbestanden', 'Bank files')}</h2>
+      <div class="group">${uploadRow()}</div>
+      <p class="group-note">${L(`Kies één of meer bestanden: het CSV-bestand van een Rabo-rekening of creditcard, of het PDF-afschrift van Openbank.
+        Bestanden mogen elkaar overlappen: wat er al staat, komt er niet nog eens bij.`, `Choose one or more files: the CSV file of a Rabo account or
+        credit card, or the PDF statement from Openbank. Files may overlap: what is already there is not added again.`)}</p>
+      ${bank.accounts.length ? `
+        <h2 class="section">${L('Rekeningen', 'Accounts')}</h2>
+        <ul class="group">${accountRows()}</ul>
+        <p class="group-note">${L('Tik op een rekening om de naam te wijzigen.', 'Tap an account to change its name.')}</p>` : ''}
+      <h2 class="section">${L('Rekenen', 'Counting')}</h2>
+      <div class="group">
+        <label class="row"><span class="row-main">${L('Tellen vanaf', 'Count from')}</span>
+          <input id="sinceInput" type="date" value="${bank.since}" aria-label="${L('Tellen vanaf', 'Count from')}"></label>
+        <a class="row" href="#/categorieen"><span class="row-main">${L('Categorieën', 'Categories')}</span>${bank.cats.length}${icon('next')}</a>
+      </div>
+      <p class="group-note">${L('Potjes en statistieken tellen alleen wat op of na deze datum is geboekt. Leeg betekent: alles.',
+        'Pots and statistics only count what was booked on or after this date. Empty means: everything.')}</p>
       <h2 class="section">${L('Back-up', 'Backup')}</h2>
       <div class="group">
         <button class="row tint" data-action="export">${L('Back-up maken', 'Make a backup')}</button>
         <button class="row tint" data-action="import">${L('Terugzetten', 'Restore')}</button>
       </div>
-      <p class="group-note">${L(`Je kaarten staan alleen op deze telefoon. Het back&#8209;upbestand bevat alle nummers
-        en codes: bewaar het als contant geld.`, `Your cards are only on this phone. The backup file holds every number
-        and code: keep it as safe as cash.`)}</p>
+      <p class="group-note">${L(`Alles staat alleen op deze telefoon. Het back&#8209;upbestand bevat je kaartnummers en codes en al je
+        bankgegevens, leesbaar voor wie het opent: bewaar het als contant geld.`, `Everything is only on this phone. The backup file holds your card
+        numbers and codes and all your bank data, readable to whoever opens it: keep it as safe as cash.`)}</p>
       <h2 class="section">${L('Taal', 'Language')}</h2>
       <div class="group">
         ${L('<button class="row tint" data-action="language" lang="en">Use English</button>',
           '<button class="row tint" data-action="language" lang="nl">Nederlands gebruiken</button>')}
       </div>`,
-    // paying with gift cards is the thumb button; a purchase paid another way sits beside it
-    dock: `
-      <button class="button" data-action="addPurchase">${icon('plus')}${L('Uitgave', 'Purchase')}</button>
-      ${active.length
-        ? `<a class="button primary" href="#/betalen">${L('Betalen', 'Pay')}</a>`
-        : `<button class="button primary" data-action="add">${L('Kaart toevoegen', 'Add card')}</button>`}`,
+  };
+}
+
+const KIND_NAMES = { out: L('Uitgaven', 'Spending'), in: L('Inkomen', 'Income'), none: L('Telt niet mee', 'Does not count') };
+
+function categoriesScreen() {
+  return {
+    html: `
+      <header class="navbar">
+        <a class="back" href="#/meer">${icon('back')}${L('Instellingen', 'Settings')}</a>
+        <h1>${L('Categorieën', 'Categories')}</h1>
+        <button class="text-button" data-action="addCat">${L('Nieuw', 'New')}</button>
+      </header>
+      ${KIND_ORDER.map((kind) => `
+        <h2 class="section">${KIND_NAMES[kind]}</h2>
+        <ul class="group">${bank.cats.filter((cat) => cat.kind === kind).map((cat) => `
+          <li><button class="row" data-action="editCat" data-id="${cat.id}"><span class="row-main">${esc(shown(cat.name))}</span>
+            <span class="amount quiet">${cat.budget ? `${formatEuro(cat.budget)} ${L('per maand', 'a month')}` : ''}</span>${icon('next')}</button></li>`).join('')}</ul>`).join('')}
+      <p class="group-note">${L('"Telt niet mee" is voor geld dat alleen verhuist: tussen je eigen rekeningen, of naar het saldo van je cadeaukaarten.',
+        '"Does not count" is for money that only moves: between your own accounts, or onto your gift cards.')}</p>`,
   };
 }
 
@@ -211,7 +765,7 @@ function cardScreen(card) {
   return {
     html: `
       <header class="navbar">
-        <a class="back" href="${left > 0 ? '#/' : '#/archief'}">${icon('back')}${left > 0 ? L('Kaarten', 'Cards') : L('Lege kaarten', 'Empty cards')}</a>
+        <a class="back" href="${left > 0 ? '#/kaarten' : '#/archief'}">${icon('back')}${left > 0 ? L('Kaarten', 'Cards') : L('Lege kaarten', 'Empty cards')}</a>
         <h1><span>${L('Kaart', 'Card')} </span>${last4(card)}</h1>
         <button class="text-button" data-action="edit">${L('Bewerken', 'Edit')}</button>
       </header>
@@ -244,7 +798,7 @@ function archiveScreen() {
   return {
     html: `
       <header class="navbar">
-        <a class="back" href="#/">${icon('back')}${L('Kaarten', 'Cards')}</a>
+        <a class="back" href="#/kaarten">${icon('back')}${L('Kaarten', 'Cards')}</a>
         <h1>${L('Lege kaarten', 'Empty cards')}</h1>
         <span></span>
       </header>
@@ -282,7 +836,7 @@ function payScreen() {
   const card = payCard();
   const back = paying.steps.length
     ? `<button class="back" data-action="payBack">${icon('back')}${L('Vorige', 'Previous')}</button>`
-    : `<a class="back" href="#/">${icon('back')}${L('Kaarten', 'Cards')}</a>`;
+    : `<a class="back" href="#/kaarten">${icon('back')}${L('Kaarten', 'Cards')}</a>`;
   if (!card) {
     return {
       html: `
@@ -338,7 +892,7 @@ async function finishPayment(cards) {
       `${formatEuro(fromCards)} by gift card, ${formatEuro(total - fromCards)} by debit card.`)
     : L(`${formatEuro(fromCards)} afgeschreven van ${plural(cards.length, 'kaart', 'kaarten')}.`,
       `${formatEuro(fromCards)} taken from ${plural(cards.length, 'card', 'cards')}.`));
-  goHome();
+  goCards();
   askWho(purchase);
 }
 
@@ -353,29 +907,18 @@ const periodShort = (unit, start) => (unit === 'week' ? String(isoWeek(start))
   : unit === 'month' ? start.toLocaleDateString(LOCALE, { month: 'short' }).replace('.', '')
   : String(start.getFullYear()));
 
-// Columns for the last few periods: the chosen one in blue, the others grey. A tap on a column chooses it.
+// The last few periods of gift card payments as columns
 function trendChart(unit, chosen) {
   const now = periodStart(unit, new Date());
   // the chart ends at the current period, unless an older one is chosen: then it ends there
   const end = chosen < shiftPeriod(unit, now, 1 - SPAN[unit]) ? chosen : now;
-  const periods = Array.from({ length: SPAN[unit] }, (unused, index) => {
+  return columnChart(Array.from({ length: SPAN[unit] }, (unused, index) => {
     const start = shiftPeriod(unit, end, index + 1 - SPAN[unit]);
-    return { start, total: summarize(state.purchases, start, shiftPeriod(unit, start, 1)).total };
-  });
-  const most = Math.max(...periods.map((period) => period.total));
-  return periods.map(({ start, total }) => {
-    const height = most ? Math.max(Math.round(total / most * 88), total ? 2 : 0) : 0; // of a 92 unit tall plot
-    // rounded at the top, square on the baseline; too short to round below 8
-    const shape = height >= 8 ? `<path d="M0 92V${96 - height}a4 4 0 0 1 4-4h16a4 4 0 0 1 4 4V92z"/>`
-      : `<rect y="${92 - height}" width="24" height="${height}"/>`;
-    const label = `${periodName(unit, start)}: ${formatEuro(total)}`;
-    return `
-      <li><button class="column" data-action="statPick" data-start="${start.getTime()}"
-        aria-pressed="${start.getTime() === chosen.getTime()}" aria-label="${label}" title="${label}">
-        <svg viewBox="0 0 24 92" aria-hidden="true">${shape}</svg>
-        <span>${periodShort(unit, start)}</span>
-      </button></li>`;
-  }).join('');
+    return {
+      id: start.getTime(), name: periodName(unit, start), short: periodShort(unit, start),
+      total: summarize(state.purchases, start, shiftPeriod(unit, start, 1)).total, chosen: start.getTime() === chosen.getTime(),
+    };
+  }), 'statPick');
 }
 
 // One row per person or shop: name, amount, share, and a bar for that share of the period.
@@ -401,8 +944,8 @@ function statsScreen() {
   return {
     html: `
       <header class="navbar">
-        <a class="back" href="#/">${icon('back')}${L('Kaarten', 'Cards')}</a>
-        <h1>${L('Uitgaven', 'Spending')}</h1>
+        <a class="back" href="#/kaarten">${icon('back')}${L('Kaarten', 'Cards')}</a>
+        <h1>${L('Bij de kassa', 'At the till')}</h1>
         <span></span>
       </header>
       <div class="segments" role="group" aria-label="${L('Periode', 'Period')}">
@@ -417,7 +960,7 @@ function statsScreen() {
           <button data-action="statStep" data-by="1" aria-label="${L('Volgende periode', 'Next period')}"${isCurrent ? ' disabled' : ''}>${icon('next')}</button>
         </div>
         <p class="total">${formatEuro(sum.total)}</p>
-        <ul class="columns">${trendChart(unit, start)}</ul>
+        ${trendChart(unit, start)}
       </section>
       ${sum.purchases.length ? `
         <h2 class="section">${L('Voor wie', 'For whom')}</h2>
@@ -428,8 +971,7 @@ function statsScreen() {
         ${paidWith(sum.cards, sum.total)}
         <h2 class="section">${L('Betalingen', 'Payments')}</h2>
         <ul class="group">${rows}</ul>`
-      : blank(L('Geen uitgaven', 'No spending'), L('In deze periode is niets vastgelegd.', 'Nothing was recorded in this period.'))}`,
-    dock: `<button class="button primary" data-action="addPurchase">${L('Uitgave toevoegen', 'Add purchase')}</button>`,
+      : blank(L('Geen betalingen', 'No payments'), L('In deze periode is niets met de kaarten betaald.', 'Nothing was paid with the cards in this period.'))}`,
   };
 }
 
@@ -438,7 +980,7 @@ function purchaseScreen(purchase) {
   return {
     html: `
       <header class="navbar">
-        <a class="back" href="#/uitgaven">${icon('back')}${L('Uitgaven', 'Spending')}</a>
+        <a class="back" href="#/uitgaven">${icon('back')}${L('Bij de kassa', 'At the till')}</a>
         <h1>${esc(shown(purchase.store))}</h1>
         <button class="text-button" data-action="editPurchase">${L('Bewerken', 'Edit')}</button>
       </header>
@@ -462,16 +1004,39 @@ function purchaseScreen(purchase) {
 
 // ---------- which screen ----------
 
-const route = () => location.hash.split('/')[1]; // "#/kaart/<id>" -> "kaart"
+const route = () => location.hash.split('/')[1] ?? ''; // "#/kaart/<id>" -> "kaart"
 const routeId = () => location.hash.split('/')[2];
 const currentCard = () => (route() === 'kaart' ? cardById(routeId()) : undefined);
 const currentPurchase = () => (route() === 'uitgave' ? purchaseById(routeId()) : undefined);
 
-// how deep the current address sits, which decides whether a change slides forward or back
-const DEPTH = { archief: 1, uitgaven: 1, kaart: 2, uitgave: 2, betalen: 3 };
+const SCREENS = {
+  potjes: potsScreen, kaarten: cardsScreen, betalen: cardsScreen, archief: archiveScreen, uitgaven: statsScreen, uitgave: statsScreen,
+  inzicht: insightScreen, transacties: transactionsScreen, meer: settingsScreen, categorieen: categoriesScreen, vast: fixedScreen,
+  categorie: () => categoryScreen(routeId()),
+};
+// how deep the current address sits, which decides whether a change slides forward or back; the tabs are 0
+const DEPTH = { meer: 1, vast: 1, categorie: 1, archief: 1, uitgaven: 1, kaart: 1, categorieen: 2, uitgave: 2, betalen: 3 };
 const depth = () => DEPTH[route()] ?? 0;
 let shownDepth = 0;
 let tapped = false; // true when a tap inside the app caused the navigation
+
+// The tab bar. Betalen starts a payment at once when there is a card to pay with.
+const TABS = [
+  ['overzicht', '#/', 'home', L('Overzicht', 'Overview')],
+  ['potjes', '#/potjes', 'pot', L('Potjes', 'Pots')],
+  ['betalen', '#/kaarten', 'scan', L('Betalen', 'Pay')],
+  ['inzicht', '#/inzicht', 'chart', L('Inzicht', 'Insight')],
+  ['transacties', '#/transacties', 'list', L('Transacties', 'Transactions')],
+];
+const TAB_OF = {
+  '': 'overzicht', meer: 'overzicht', categorieen: 'overzicht', potjes: 'potjes', vast: 'potjes',
+  kaarten: 'betalen', archief: 'betalen', uitgaven: 'betalen', uitgave: 'betalen', inzicht: 'inzicht', transacties: 'transacties',
+};
+let tab = 'overzicht'; // a category is reached from several tabs and keeps the one it came from
+
+const tabsHtml = () => TABS.map(([id, address, glyph, label]) => `
+  <a class="tab${id === 'betalen' ? ' pay-tab' : ''}" href="${id === 'betalen' && useOrder().length ? '#/betalen' : address}"${id === tab ? ' aria-current="page"' : ''}>
+    ${icon(glyph)}<span>${label}</span></a>`).join('');
 
 function render() {
   const card = currentCard();
@@ -480,17 +1045,20 @@ function render() {
   if (route() !== 'betalen') paying = null;
   else paying ??= { queue: useOrder(), steps: [] };
   const atTill = Boolean(card || paying?.queue.length); // the screens a till scanner reads stay white
-  const screen = needsInstall(navigator.userAgent, standalone) ? installScreen()
+  const install = needsInstall(navigator.userAgent, standalone);
+  const screen = install ? installScreen()
     : card ? cardScreen(card)
     : atTill ? payScreen()
     : purchase ? purchaseScreen(purchase)
-    : ['uitgaven', 'uitgave'].includes(route()) ? statsScreen()
-    : route() === 'archief' ? archiveScreen()
-    : homeScreen();
+    : (SCREENS[route()] ?? overviewScreen)();
+  tab = TAB_OF[route()] ?? tab;
   document.body.classList.toggle('pay', atTill);
   app.innerHTML = screen.html;
   $('dock').innerHTML = screen.dock ?? '';
   $('dock').hidden = !screen.dock;
+  // the tab bar makes room for the screens the till reads: there the dock has the thumb
+  $('tabs').innerHTML = tabsHtml();
+  $('tabs').hidden = atTill || install;
   shownDepth = depth();
   // the iPhone status bar takes the colour of the screen below it
   document.querySelector('meta[name="theme-color"]').content = getComputedStyle(document.body).backgroundColor;
@@ -526,9 +1094,9 @@ function go(address) {
   location.hash = address;
 }
 
-function goHome() {
+function goCards() {
   tapped = depth() > 0;
-  location.hash = '#/';
+  location.hash = '#/kaarten';
 }
 
 // ---------- dialogs ----------
@@ -636,6 +1204,151 @@ async function askWho(purchase) {
   save();
 }
 
+// Sorts a transaction: a category for it alone, or for everything from its counterparty, and whether
+// that counterparty is a fixed cost.
+async function askTx(tx) {
+  const form = $('txDialog').querySelector('form');
+  const key = ruleKey(tx.name); // empty for a name without letters: then there is nothing to hang a rule on
+  const before = sorter(bank)(tx);
+  $('txFacts').innerHTML = `
+    <p class="row"><span class="row-main">${esc(tx.name)} <small>${formatDate(tx.date, 'UTC')} · ${esc(accountById(tx.acc)?.name ?? '')}</small></span>
+      <span class="amount${tx.cents > 0 ? ' plus' : ''}">${signed(tx.cents)}</span></p>
+    ${tx.text ? `<p class="row"><small class="row-main selectable">${esc(tx.text)}</small></p>` : ''}`;
+  const choice = (id, name) => `
+    <label class="row choice"><input type="radio" name="cat" value="${id}"${id === before ? ' checked' : ''}>
+      <span class="row-main">${name}</span>${icon('check')}</label>`;
+  $('txCats').innerHTML = sortedCats().map((cat) => choice(cat.id, esc(shown(cat.name)))).join('') + choice('', L('Nog niet indelen', 'Leave unsorted'));
+  const { all, fixed } = form.elements;
+  $('txAllRow').hidden = !key;
+  $('txAllLabel').textContent = L(`Ook al het andere van ${tx.name}`, `Everything else from ${tx.name} too`);
+  all.checked = Boolean(key) && tx.cat === undefined;
+  $('txFixedRow').hidden = !key || tx.cents >= 0;
+  fixed.checked = bank.fixed[key] === true;
+  if (await openDialog($('txDialog')) !== 'ok') return;
+  const cat = form.elements.cat.value;
+  if (all.checked) {
+    if (cat) bank.rules[key] = cat;
+    else delete bank.rules[key];
+    const same = bank.txs.filter((each) => ruleKey(each.name) === key);
+    for (const each of same) delete each.cat;
+    if (same.length > 1) toast(L(`${same.length} transacties van ${tx.name} ingedeeld.`, `${same.length} transactions from ${tx.name} sorted.`));
+  } else if (cat) tx.cat = cat;
+  else delete tx.cat;
+  if (!$('txFixedRow').hidden && fixed.checked !== (bank.fixed[key] === true)) bank.fixed[key] = fixed.checked;
+  saveBank();
+}
+
+// Adds a category, or edits `cat` when given. An amount per month makes a spending category a pot.
+async function editCat(cat) {
+  const form = $('catDialog').querySelector('form');
+  const field = form.elements;
+  form.reset();
+  const builtIn = Boolean(cat) && START_IDS.has(cat.id); // the app counts on these: they can be renamed, nothing else
+  $('catTitle').textContent = cat ? L('Categorie bewerken', 'Edit category') : L('Nieuwe categorie', 'New category');
+  field.name.value = cat?.name ?? '';
+  field.kind.value = cat?.kind ?? 'out';
+  field.kind.disabled = builtIn;
+  field.budget.value = cat?.budget ? euroInput(cat.budget) : '';
+  field.kind.onchange = () => { $('catBudgetField').hidden = field.kind.value !== 'out'; };
+  field.kind.onchange();
+  $('catDeleteGroup').hidden = !cat || builtIn;
+  const usual = cat?.kind === 'out' ? average([1, 2, 3].map((back) => monthFigures(shiftMonth(thisMonth(), -back)).byCat.get(cat.id) ?? 0)) : 0;
+  $('catHint').textContent = usual > 0 ? L(`De laatste drie maanden ging hier gemiddeld ${formatEuro(usual)} per maand aan op.`,
+    `Over the last three months this took ${formatEuro(usual)} a month on average.`) : '';
+  let next;
+  const answer = await openDialog($('catDialog'), () => {
+    next = { name: field.name.value.trim(), kind: field.kind.value, budget: field.budget.value.trim() ? parseEuro(field.budget.value) : 0 };
+    if (!isName(next.name)) return L('Vul een naam in.', 'Enter a name.');
+    if (bank.cats.some((other) => other !== cat && other.name.toLowerCase() === next.name.toLowerCase())) return L('Deze categorie bestaat al.', 'This category already exists.');
+    if (next.budget === null) return ENTER_AMOUNT;
+    return '';
+  });
+  if (answer === 'delete') {
+    const sure = await ask(L(`Categorie ${cat.name} verwijderen? Wat erin zat, moet opnieuw worden ingedeeld.`,
+      `Delete the category ${cat.name}? What was in it has to be sorted again.`), L('Verwijderen', 'Delete'));
+    if (!sure) return;
+    bank.cats = bank.cats.filter((other) => other !== cat);
+    for (const [key, id] of Object.entries(bank.rules)) if (id === cat.id) delete bank.rules[key];
+    for (const tx of bank.txs) if (tx.cat === cat.id) delete tx.cat;
+    saveBank();
+    if (route() === 'categorie') actions.back();
+    return;
+  }
+  if (answer !== 'ok') return;
+  const { budget, ...rest } = next;
+  const saved = cat ?? bank.cats[bank.cats.push({ id: `c-${crypto.randomUUID().slice(0, 8)}` }) - 1];
+  Object.assign(saved, rest);
+  if (budget && saved.kind === 'out') saved.budget = budget;
+  else delete saved.budget;
+  saveBank();
+}
+
+// Resolves with the entered text, or null when cancelled.
+async function askText(title, label, value) {
+  const form = $('textDialog').querySelector('form');
+  $('textTitle').textContent = title;
+  $('textLabel').textContent = label;
+  form.elements.text.value = value;
+  let text;
+  const answer = await openDialog($('textDialog'), () => {
+    text = form.elements.text.value.trim();
+    return isName(text) ? '' : L('Vul een naam in.', 'Enter a name.');
+  });
+  return answer === 'ok' ? text : null;
+}
+
+// ---------- bank files ----------
+
+// The pieces of text of a PDF with their place on the page. The PDF reader is large, so it is only loaded here.
+async function pdfItems(bytes) {
+  const pdfjs = await import('./vendor/pdf.min.mjs');
+  pdfjs.GlobalWorkerOptions.workerSrc = 'vendor/pdf.worker.min.mjs';
+  const pdf = await pdfjs.getDocument({ data: bytes, isEvalSupported: false }).promise;
+  const items = [];
+  for (let page = 1; page <= pdf.numPages; page++) {
+    const { items: texts } = await (await pdf.getPage(page)).getTextContent();
+    for (const text of texts) items.push({ page, x: text.transform[4], y: text.transform[5], str: text.str });
+  }
+  return items;
+}
+
+// Reads the chosen files: bank exports, and the starter file with categories and rules. Each file is taken whole or not at all.
+async function importBankFiles() {
+  const files = [...$('bankFiles').files];
+  $('bankFiles').value = '';
+  if (!files.length) return;
+  toast(L('Bestanden lezen…', 'Reading files…'));
+  const now = new Date().toISOString();
+  const failed = [];
+  let added = 0;
+  let changed = false;
+  let starter = false;
+  for (const file of files) {
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const isPdf = String.fromCharCode(...bytes.subarray(0, 4)) === '%PDF';
+      const text = isPdf ? '' : decodeText(bytes);
+      if (isPdf) added += addFile(bank, readOpenbank(await pdfItems(bytes)), now);
+      else if (text.trimStart().startsWith('{')) {
+        if (!addStarter(bank, JSON.parse(text))) throw new Error('unknown');
+        starter = true;
+      } else added += addFile(bank, readCsv(text), now);
+      changed = true;
+    } catch {
+      failed.push(file.name);
+    }
+  }
+  if (changed) {
+    state.needsBackup = true;
+    localStorage.setItem(KEY, JSON.stringify(state));
+    saveBank();
+  }
+  const news = !changed ? '' : added ? L(`${plural(added, 'nieuwe transactie', 'nieuwe transacties')} toegevoegd.`, `${plural(added, 'new transaction', 'new transactions')} added.`)
+    : starter ? L('Categorieën en regels toegevoegd.', 'Categories and rules added.')
+    : L('Niets nieuws: alles stond er al in.', 'Nothing new: it was all there already.');
+  toast([news, failed.length ? `${L('Niet gelezen', 'Not read')}: ${failed.join(', ')}.` : ''].filter(Boolean).join(' '));
+}
+
 // ---------- actions ----------
 
 // Adds a card, or edits `card` when given.
@@ -677,26 +1390,25 @@ async function editCard(card) {
   save();
 }
 
-// Adds a purchase paid without gift cards, or edits `purchase` when given.
+// Edits a purchase. New ones only come from paying with cards: what was paid by pin is on the bank statement.
 async function editPurchase(purchase) {
   const form = $('purchaseDialog').querySelector('form');
   const field = form.elements;
   form.reset();
-  $('purchaseTitle').textContent = purchase ? L('Uitgave bewerken', 'Edit purchase') : L('Uitgave toevoegen', 'Add purchase');
+  $('purchaseTitle').textContent = L('Uitgave bewerken', 'Edit purchase');
   // a purchase saved with a shop from before this list keeps that shop
-  const choices = purchase && !SHOPS.includes(purchase.store) ? [...SHOPS, purchase.store] : SHOPS;
+  const choices = SHOPS.includes(purchase.store) ? SHOPS : [...SHOPS, purchase.store];
   field.store.innerHTML = choices.map((shop) => `<option value="${esc(shop)}">${esc(shown(shop))}</option>`).join('');
-  // a new purchase starts with the shop of the last one that was paid without cards
-  field.store.value = purchase?.store ?? state.purchases.findLast((each) => !each.cards && SHOPS.includes(each.store))?.store ?? SHOPS[0];
-  const before = isoDate(new Date(purchase?.at ?? Date.now()));
-  field.total.value = purchase ? euroInput(purchase.total) : '';
+  field.store.value = purchase.store;
+  const before = isoDate(new Date(purchase.at));
+  field.total.value = euroInput(purchase.total);
   field.date.value = before;
   let next;
   const answer = await openDialog($('purchaseDialog'), () => {
     next = { store: field.store.value.trim(), total: parseEuro(field.total.value), date: field.date.value };
     if (!isName(next.store)) return L('Kies de winkel.', 'Choose the shop.');
     if (!next.total) return L('Vul het bedrag in, bijvoorbeeld 25,00.', 'Enter the amount, for example 25.00.');
-    if (purchase && next.total < purchase.cards) {
+    if (next.total < purchase.cards) {
       return L(`Minstens ${formatEuro(purchase.cards)}: zoveel is met cadeaukaarten betaald.`,
         `At least ${formatEuro(purchase.cards)}: that much was paid with gift cards.`);
     }
@@ -705,14 +1417,7 @@ async function editPurchase(purchase) {
   });
   if (answer !== 'ok') return;
   // the time of day is kept unless the date changed; another day counts as noon that day
-  const at = next.date === before ? purchase?.at ?? new Date().toISOString() : new Date(`${next.date}T12:00`).toISOString();
-  if (!purchase) {
-    const added = { ...newPurchase(next.store, next.total, 0), at };
-    state.purchases.push(added);
-    save();
-    askWho(added);
-    return;
-  }
+  const at = next.date === before ? purchase.at : new Date(`${next.date}T12:00`).toISOString();
   const wasSplit = purchase.shares.length > 1;
   const resized = next.total !== purchase.total;
   Object.assign(purchase, { store: next.store, at, total: next.total });
@@ -724,7 +1429,7 @@ async function editPurchase(purchase) {
 async function exportBackup() {
   const name = `kassa-backup-${isoDate()}.json`;
   const { cards, purchases } = state;
-  const json = JSON.stringify({ app: 'kassa', version: 1, exportedAt: new Date().toISOString(), cards, purchases }, null, 2);
+  const json = JSON.stringify({ app: 'kassa', version: 2, exportedAt: new Date().toISOString(), cards, purchases, bank });
   const file = new File([json], name, { type: 'application/json' });
   try {
     if (navigator.canShare?.({ files: [file] })) {
@@ -744,21 +1449,27 @@ async function importBackup() {
   $('importFile').value = '';
   if (!file) return;
   let next;
+  let nextBank; // a backup from before the bank side has none: then the bank data in the app stays
   try {
-    next = parseState(await file.text());
+    const text = await file.text();
+    next = parseState(text);
+    const saved = JSON.parse(text).bank;
+    if (saved) nextBank = parseBank(saved);
   } catch {
     toast(L('Dit is geen geldige back-up van Kassa.', 'This is not a valid Kassa backup.'));
     return;
   }
   const sure = await ask(
-    L(`Back-up met ${next.cards.length} kaarten terugzetten? Dit vervangt de ${state.cards.length} kaarten en alle uitgaven die nu in de app staan.`,
-      `Restore the backup with ${next.cards.length} cards? This replaces the ${state.cards.length} cards and all purchases now in the app.`),
+    L(`Back-up met ${next.cards.length} kaarten${nextBank ? ` en ${nextBank.txs.length} transacties` : ''} terugzetten? Dit vervangt de kaarten en kassabetalingen${nextBank ? ' en alle bankgegevens' : ''} die nu in de app staan.`,
+      `Restore the backup with ${next.cards.length} cards${nextBank ? ` and ${nextBank.txs.length} transactions` : ''}? This replaces the cards and till payments${nextBank ? ' and all bank data' : ''} now in the app.`),
     L('Terugzetten', 'Restore'),
   );
   if (!sure) return;
   state = { ...next, needsBackup: false };
-  save();
-  goHome();
+  if (nextBank) bank = nextBank;
+  localStorage.setItem(KEY, JSON.stringify(state));
+  saveBank();
+  go('#/');
 }
 
 // Each action gets the card of the current screen (if any) and the element that was tapped.
@@ -772,6 +1483,51 @@ const actions = {
     localStorage.setItem(`${KEY}-lang`, L('en', 'nl'));
     location.reload();
   },
+  back() {
+    tapped = true;
+    if (history.length > 1) history.back();
+    else location.hash = '#/';
+  },
+
+  // the bank side
+  upload: () => $('bankFiles').click(),
+  tx: (card, button) => askTx(bank.txs.find((tx) => tx.id === button.dataset.id)),
+  sortParty: (card, button) => askTx(bank.txs.find((tx) => tx.id === button.dataset.id)),
+  addCat: () => editCat(),
+  editCat: (card, button) => editCat(catById(button.dataset.id)),
+  deleteCat: (card, button) => closeDialog(button.closest('dialog'), 'delete'),
+  async renameAccount(card, button) {
+    const account = accountById(button.dataset.id);
+    const name = await askText(L('Naam van de rekening', 'Name of the account'), `${account.bank} ${account.id.slice(-4)}`, account.name);
+    if (name === null) return;
+    account.name = name;
+    saveBank();
+  },
+  fixedYes(card, button) { bank.fixed[button.dataset.id] = true; saveBank(); },
+  fixedNo(card, button) { bank.fixed[button.dataset.id] = false; saveBank(); },
+  // which month (or year) the pots, a category, the fixed costs and the insight screen show
+  monthStep(card, button) {
+    const by = Number(button.dataset.by) * (route() === 'inzicht' && view.unit === 'year' ? 12 : 1);
+    const month = shiftMonth(view.month, by);
+    view.month = month > thisMonth() ? thisMonth() : month;
+    redraw(`[data-by="${button.dataset.by}"]`);
+  },
+  pickMonth(card, button) {
+    Object.assign(view, { month: button.dataset.id, unit: 'month' });
+    redraw('.column[aria-pressed="true"]');
+  },
+  unit(card, button) {
+    view.unit = button.dataset.id;
+    redraw(`[data-action="unit"][data-id="${view.unit}"]`);
+  },
+  pickWorth(card, button) {
+    view.worth = button.dataset.id;
+    redraw('.hit[aria-pressed="true"]');
+  },
+  moreRows() {
+    view.rows += 100;
+    render();
+  },
 
   // one step of a payment: the till emptied this card, it was skipped, or the last step is taken back
   payNext() { paying.steps.push(true); slide('push', show); },
@@ -784,7 +1540,6 @@ const actions = {
     go('#/betalen');
   },
 
-  addPurchase: () => editPurchase(),
   editPurchase: () => editPurchase(currentPurchase()),
   who: () => askWho(currentPurchase()),
   async deletePurchase() {
@@ -814,7 +1569,7 @@ const actions = {
     redraw(`[data-by="${button.dataset.by}"]`);
   },
   statPick(card, button) {
-    stats.start = new Date(Number(button.dataset.start));
+    stats.start = new Date(Number(button.dataset.id));
     redraw('.column[aria-pressed="true"]');
   },
 
@@ -840,7 +1595,7 @@ const actions = {
     if (!sure) return;
     state.cards = state.cards.filter((other) => other !== card);
     save();
-    goHome();
+    goCards();
   },
 
   async undo(card, button) {
@@ -867,8 +1622,33 @@ document.addEventListener('click', (event) => {
   if (target) actions[target.dataset.action](currentCard(), target);
 });
 $('importFile').addEventListener('change', importBackup);
+$('bankFiles').addEventListener('change', importBankFiles);
+// the search field and the pick lists of the transactions screen redraw only the list, so the keyboard stays up
+document.addEventListener('input', (event) => {
+  if (event.target.id !== 'txSearch') return;
+  Object.assign(view, { query: event.target.value, rows: 60 });
+  $('txList').innerHTML = txList();
+});
+document.addEventListener('change', (event) => {
+  const { filter } = event.target.dataset;
+  if (filter) {
+    Object.assign(view, { [filter]: event.target.value, rows: 60 });
+    $('txList').innerHTML = txList();
+  }
+  if (event.target.id === 'sinceInput' && (event.target.value === '' || isDate(event.target.value))) {
+    bank.since = event.target.value;
+    saveBank();
+  }
+});
+// the months of the line chart are drawn, not buttons: give them the keys a button has
+document.addEventListener('keydown', (event) => {
+  if (!['Enter', ' '].includes(event.key) || !event.target.matches?.('svg [role="button"]')) return;
+  event.preventDefault();
+  actions[event.target.dataset.action](undefined, event.target);
+});
 
 addEventListener('hashchange', () => {
+  view.rows = 60;
   const next = depth();
   const nav = next > shownDepth ? 'push' : next < shownDepth ? 'pop' : '';
   // slide only after a tap in the app: the iPhone back gesture brings its own animation
@@ -892,4 +1672,5 @@ if (lang === 'en') {
 navigator.storage?.persist?.(); // ask the browser not to evict the cards
 navigator.serviceWorker?.register('sw.js');
 state = load();
+bank = loadBank();
 render();
