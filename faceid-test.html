@@ -30,7 +30,7 @@
   <p>Checks whether Face ID can unlock data on this phone. Nothing in Kassa changes.</p>
   <ol>
     <li>In Safari: tap 1 once, then tap 2. Note the key code.</li>
-    <li>Share → Add to Home Screen. Open "Face ID test" from the Home Screen and tap only 2.</li>
+    <li>Share → Add to Home Screen. Open "Face ID test" from the Home Screen and tap only 2, not 1.</li>
     <li>Send Claude a screenshot of both results.</li>
   </ol>
   <div class="card" id="info">Checking this phone…</div>
@@ -76,7 +76,7 @@ $('make').onclick = async () => {
     } });
     const enabled = cred.getClientExtensionResults().prf?.enabled;
     if (enabled === false) show(`${where}: passkey made, but it cannot make keys.\nFace ID login would work; locking the data would still need the household password.`, 'bad');
-    else show(`${where}: passkey made${enabled ? ' and it can make keys' : ''}.\nNow tap 2.`);
+    else show(`${where}: passkey ${hex(cred.rawId).slice(0, 8).toUpperCase()} made${enabled ? ' and it can make keys' : ''}.\nNow tap 2.`);
   } catch (e) {
     show(`${where}: making the passkey failed.\n${e.name}: ${e.message}`, 'bad');
   }
@@ -106,7 +106,7 @@ $('unlock').onclick = async () => {
     let before = null;
     try { before = localStorage.getItem('kassa-prf-test-code'); localStorage.setItem('kassa-prf-test-code', code); } catch { /* private mode */ }
     const again = before ? (before === code ? '\nSame code as last time here ✓' : `\nDifferent from last time here (${before}): did you pick another passkey?`) : '';
-    show(`${where}: ✓ Works. Face ID gave a key, and it locked and unlocked a test text.\nKey code: ${code}${again}`, 'ok');
+    show(`${where}: ✓ Works. Face ID gave a key, and it locked and unlocked a test text.\nPasskey: ${hex(got.rawId).slice(0, 8).toUpperCase()}\nKey code: ${code}${again}`, 'ok');
   } catch (e) {
     show(`${where}: unlocking failed.\n${e.name}: ${e.message}`, 'bad');
   }
