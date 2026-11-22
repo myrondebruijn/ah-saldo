@@ -576,9 +576,7 @@ function insightScreen() {
     <li class="row"><span class="row-main">${label} <small>${detail}</small></span>
       <span class="amount">${formatEuro(Math.abs(now.spending - other))} ${now.spending > other ? L('meer', 'more') : L('minder', 'less')}</span></li>` : '');
   // net worth at the end of each month; the running month stands at today
-  const points = chartMonths().length ? (yearly ? chartMonths() : chartMonths()).map((month) => ({
-    id: month, name: monthShort(month), cents: worthOn(month === thisMonth() ? '9999' : `${month}-31`),
-  })) : [];
+  const points = chartMonths().map((month) => ({ id: month, name: monthShort(month), cents: worthOn(month === thisMonth() ? '9999' : `${month}-31`) }));
   const worthMonth = points.some((point) => point.id === view.worth) ? view.worth : points.at(-1)?.id;
   const fixed = fixedSummary(view.month);
   if (!bank.accounts.length) {
@@ -1010,7 +1008,7 @@ const currentCard = () => (route() === 'kaart' ? cardById(routeId()) : undefined
 const currentPurchase = () => (route() === 'uitgave' ? purchaseById(routeId()) : undefined);
 
 const SCREENS = {
-  potjes: potsScreen, kaarten: cardsScreen, betalen: cardsScreen, archief: archiveScreen, uitgaven: statsScreen, uitgave: statsScreen,
+  potjes: potsScreen, kaarten: cardsScreen, kaart: cardsScreen, betalen: cardsScreen, archief: archiveScreen, uitgaven: statsScreen, uitgave: statsScreen,
   inzicht: insightScreen, transacties: transactionsScreen, meer: settingsScreen, categorieen: categoriesScreen, vast: fixedScreen,
   categorie: () => categoryScreen(routeId()),
 };
@@ -1030,7 +1028,8 @@ const TABS = [
 ];
 const TAB_OF = {
   '': 'overzicht', meer: 'overzicht', categorieen: 'overzicht', potjes: 'potjes', vast: 'potjes',
-  kaarten: 'betalen', archief: 'betalen', uitgaven: 'betalen', uitgave: 'betalen', inzicht: 'inzicht', transacties: 'transacties',
+  kaarten: 'betalen', kaart: 'betalen', betalen: 'betalen', archief: 'betalen', uitgaven: 'betalen', uitgave: 'betalen',
+  inzicht: 'inzicht', transacties: 'transacties',
 };
 let tab = 'overzicht'; // a category is reached from several tabs and keeps the one it came from
 

@@ -1,7 +1,7 @@
 {
   "name": "Kassa",
   "short_name": "Kassa",
-  "description": "Betaal met je AH cadeaukaarten en houd je boodschappen bij.",
+  "description": "Betaal met je AH cadeaukaarten en houd het huishoudgeld bij.",
   "lang": "nl",
   "start_url": "./",
   "scope": "./",
