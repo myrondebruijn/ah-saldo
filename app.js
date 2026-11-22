@@ -4,7 +4,7 @@ import {
   validCode, validNumber,
 } from './logic.js';
 import {
-  AH, LARGE, START_CATS, US, addBalance, addFile, addStarter, balanceOn, byParty, cardsOn, catchUp, decodeText, dayRate, dueOn, emptyBank, figures, fixedCosts,
+  AH, LARGE, START_CATS, US, addBalance, addFile, addStarter, balanceOn, byParty, cardsOn, catchUp, decodeText, dayRate, dueOn, emptyBank, ended, figures, fixedCosts,
   fixedSuggestions, forWhom, giftGuesses, giftsBought, giftsToFill, hasGap, heldShops, inCategory, monthOf, parseBank, payFrom, readCsv,
   addLinked, readLinked, readOpenbank, ruleKey, shiftMonth, sorter,
 } from './bank.js';
@@ -1119,13 +1119,14 @@ function change(cents, text) {
 
 // The running month added up day by day, and the month before as a dashed line beside it. From today two lines go
 // on to the end of the month: what is sure (the fixed costs still to come, each on its day; one that is late
-// tomorrow) and, dotted and above it, the forecast, which adds `rate` cents for every day.
-function paceChart(month, day, coming, rate) {
+// tomorrow) and, dotted and above it, the forecast, which adds `rate` cents for every day. `past` is the bank
+// data the month before is read from.
+function paceChart(month, day, coming, rate, past) {
   const before = shiftMonth(month, -1);
   const days = daysIn(month);
-  const added = (each, last) => Array.from({ length: last }, (unused, index) => figures(bank, state.purchases, `${each}-01`, afterDay(each, index + 1)).spending);
-  const now = added(month, day);
-  const then = `${before}-01` >= bank.since ? added(before, daysIn(before)) : [];
+  const added = (each, last, data) => Array.from({ length: last }, (unused, index) => figures(data, state.purchases, `${each}-01`, afterDay(each, index + 1)).spending);
+  const now = added(month, day, bank);
+  const then = `${before}-01` >= bank.since ? added(before, daysIn(before), past) : [];
   const sure = Array.from({ length: days - day + 1 }, (unused, index) => now.at(-1)
     + coming.filter((each) => Math.max(each.date, day + 1) <= day + index).reduce((sum, each) => sum + each.cost.expected, 0));
   const ahead = sure.map((cents, index) => cents + Math.round(rate * index));
@@ -1174,8 +1175,11 @@ function insightScreen() {
   const days = daysIn(view.month);
   const open = running && day < days; // days are left: the rest of the month has something to say
   const before = [1, 2, 3].map((back) => shiftMonth(view.month, -back));
-  const whole = before.map(monthFigures);
-  const sofar = before.map((month, index) => (running ? figures(bank, state.purchases, `${month}-01`, afterDay(month, day)) : whole[index]));
+  // the months before are read without what is over: a loan that is paid off says nothing about a month now
+  const over = ended(bank, view.month);
+  const past = over.size ? { ...bank, txs: bank.txs.filter((tx) => !over.has(ruleKey(tx.name))) } : bank;
+  const whole = before.map((month) => figures(past, state.purchases, ...monthRange(month)));
+  const sofar = before.map((month, index) => (running ? figures(past, state.purchases, `${month}-01`, afterDay(month, day)) : whole[index]));
   const known = (index) => `${before[index]}-01` >= bank.since && whole[index].spending > 0; // in the data from its first day
   const usual = !yearly && [0, 1, 2].every(known) ? (id) => average(sofar.map((each) => Math.max(0, each.byCat.get(id) ?? 0))) : null;
   const average3 = usual ? average(whole.map((each) => each.spending)) : 0;
@@ -1250,7 +1254,7 @@ function insightScreen() {
           <span>${daysLeft === 1 ? L('nog 1 dag', '1 day left') : L(`nog ${daysLeft} dagen`, `${daysLeft} days left`)}</span></h2>
         <section class="summary">
           <h3 class="chart-title">${L('Uitgegeven tot nu, per dag opgeteld', 'Spent so far, added up per day')}</h3>
-          ${paceChart(view.month, day, coming, rate)}
+          ${paceChart(view.month, day, coming, rate, past)}
         </section>
         <div class="tiles">
           <section class="tile">
@@ -1276,7 +1280,8 @@ function insightScreen() {
         </div>
         <p class="group-note">${L(`Zeker is wat er al uit is plus de vaste lasten die nog komen. De verwachting telt daar ${wholeEuro(rate)} per dag bij op: je kleine uitgaven in het tempo van deze maand en de drie ervoor, plus wat uitgaven vanaf ${wholeEuro(LARGE)} in die drie maanden gemiddeld per dag kostten. Eén grote uitgave deze maand telt dus niet als tempo.`,
           `For sure is what went out already plus the fixed costs still to come. The forecast adds ${wholeEuro(rate)} a day to that: your small purchases at the pace of this month and the three before, plus what purchases of ${wholeEuro(LARGE)} or more came to per day in those three months. So one large purchase this month does not count as a pace.`)}${
-          average3 ? ` ${L('Je gemiddelde is wat er de drie maanden ervoor gemiddeld uitging.', 'Your average is what went out on average in the three months before.')}` : ''}</p>
+          average3 ? ` ${L('Je gemiddelde is wat er de drie maanden ervoor gemiddeld uitging.', 'Your average is what went out on average in the three months before.')}` : ''}${
+          over.size ? ` ${L('Een vaste last die is gestopt telt in de maanden ervoor niet mee.', 'A fixed cost that has stopped is left out of the months before.')}` : ''}</p>
         ${coming.length ? `
           <h2 class="section split-head"><span>${L('Vaste lasten die nog komen', 'Fixed costs still to come')}</span><span>${formatEuro(fixed.waiting)}</span></h2>
           <ul class="group">${coming.map(({ cost, tx, date }) => `

@@ -595,6 +595,13 @@ export function fixedCosts(bank, month) {
   }).sort((a, b) => (b.expected || b.paid) - (a.expected || a.paid));
 }
 
+// The counterparties that are over in `month`: switched off as a fixed cost and not paid since that month began,
+// like a loan that is paid off. What they cost says nothing about a month now, so what looks back leaves them out.
+export function ended(bank, month) {
+  const paid = new Set(bank.txs.filter((tx) => tx.date >= `${month}-01`).map((tx) => ruleKey(tx.name)));
+  return new Set(Object.keys(bank.fixed).filter((key) => !bank.fixed[key] && !paid.has(key)));
+}
+
 // A payment from this many cents on is no everyday spending: one of them sets no pace for the days after it.
 export const LARGE = 10000;
 // This month's everyday pace weighs as much as the months before once the month is this many days old.
@@ -603,13 +610,14 @@ const STEADY = 7;
 // What a day still to come in the month of `today` will probably cost besides the fixed costs, in cents.
 // Everyday payments (under LARGE) go on at this month's pace, steadied by the three months before. A larger
 // payment or money back sets no pace: those count for what they came to per day in the months before.
-// A counterparty the user decided on stays out: a fixed cost is counted by itself, one switched off is over.
+// A fixed cost stays out, because it is counted by itself, and so does a counterparty that is over.
 // shortcut: LARGE and STEADY were picked on one household's five months, try them again when there is a year of data.
 export function dayRate(bank, purchases, today) {
   const month = monthOf(today);
   const day = Number(today.slice(8));
   const start = `${month}-01`;
-  const free = bank.txs.filter((tx) => !Object.hasOwn(bank.fixed, ruleKey(tx.name)));
+  const over = ended(bank, month);
+  const free = bank.txs.filter((tx) => bank.fixed[ruleKey(tx.name)] !== true && !over.has(ruleKey(tx.name)));
   const small = free.filter((tx) => tx.cents < 0 && tx.cents > -LARGE);
   const spent = (txs, from, to) => figures({ ...bank, txs }, purchases, from, to).spending;
   const now = spent(small, start, '9999');
