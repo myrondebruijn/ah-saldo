@@ -26,7 +26,7 @@ export const START_CATS = [
 ];
 const KINDS = ['out', 'in', 'none'];
 
-export const emptyBank = () => ({ accounts: [], txs: [], cats: START_CATS.map((cat) => ({ ...cat })), rules: {}, fixed: {}, since: '' });
+export const emptyBank = () => ({ accounts: [], txs: [], cats: START_CATS.map((cat) => ({ ...cat })), rules: {}, fixed: {}, since: '', planned: [] });
 
 // ---------- reading bank files ----------
 
@@ -607,25 +607,44 @@ export const LARGE = 10000;
 // This month's everyday pace weighs as much as the months before once the month is this many days old.
 const STEADY = 7;
 
-// What a day still to come in the month of `today` will probably cost besides the fixed costs, in cents.
-// Everyday payments (under LARGE) go on at this month's pace, steadied by the three months before. A larger
-// payment or money back sets no pace: those count for what they came to per day in the months before.
-// A fixed cost stays out, because it is counted by itself, and so does a counterparty that is over.
-// shortcut: LARGE and STEADY were picked on one household's five months, try them again when there is a year of data.
+// What a day still to come in the month of `today` will probably cost in everyday payments, in cents: those
+// under LARGE, at this month's pace, steadied by the three months before. A larger payment and money back are
+// left out: when the next one comes cannot be told from the months before (counting on their average made the
+// forecast worse, not better), so a large payment only counts once the user plans it. A fixed cost stays out,
+// because it is counted by itself, and so does a counterparty that is over.
+// shortcut: LARGE and STEADY were picked on one household's eight months, try them again when there is a year of data.
 export function dayRate(bank, purchases, today) {
   const month = monthOf(today);
   const day = Number(today.slice(8));
   const start = `${month}-01`;
   const over = ended(bank, month);
-  const free = bank.txs.filter((tx) => bank.fixed[ruleKey(tx.name)] !== true && !over.has(ruleKey(tx.name)));
-  const small = free.filter((tx) => tx.cents < 0 && tx.cents > -LARGE);
-  const spent = (txs, from, to) => figures({ ...bank, txs }, purchases, from, to).spending;
-  const now = spent(small, start, '9999');
+  const small = { ...bank, txs: bank.txs.filter((tx) => tx.cents < 0 && tx.cents > -LARGE
+    && bank.fixed[ruleKey(tx.name)] !== true && !over.has(ruleKey(tx.name))) };
+  const now = figures(small, purchases, start, '9999').spending;
   const from = [`${shiftMonth(month, -3)}-01`, bank.since].sort().at(-1);
   const before = (Date.parse(start) - Date.parse(from)) / 864e5; // the days there is history of
-  if (!(before > 0)) return now / day; // nothing earlier to go by
-  const then = spent(small, from, start);
-  return Math.max(0, (now + then / before * STEADY) / (day + STEADY) + (spent(free, from, start) - then) / before);
+  return before > 0 ? (now + figures(small, purchases, from, start).spending / before * STEADY) / (day + STEADY) : now / day;
+}
+
+// ---------- planned payments ----------
+// A payment the user knows is coming: bank.planned = [{ id, name, cents, date, since }]. `cents` is what it will
+// cost, `date` the day it is expected and `since` the day it was planned. It belongs to the month of its date.
+
+// The planned payments of the month of `today` and later that the bank has not shown yet. A spending line of
+// within a tenth of the amount, from the day the payment was planned up to the end of its month, is that
+// payment; one line settles one payment.
+// shortcut: another payment of about the same amount settles it too; ask which line it was if that ever bites.
+export function plannedOpen(bank, today) {
+  const catOf = sorter(bank);
+  const kinds = new Map(bank.cats.map((cat) => [cat.id, cat.kind]));
+  const lines = bank.txs.filter((tx) => tx.cents < 0 && (kinds.get(catOf(tx)) ?? 'out') === 'out').sort(byDate);
+  const used = new Set();
+  return bank.planned.filter((plan) => {
+    const hit = lines.find((tx) => !used.has(tx.id) && tx.date >= plan.since && monthOf(tx.date) <= monthOf(plan.date)
+      && Math.abs(tx.cents + plan.cents) * 10 <= plan.cents);
+    if (hit) used.add(hit.id);
+    return !hit && monthOf(plan.date) >= monthOf(today);
+  });
 }
 
 // ---------- balances ----------
@@ -678,6 +697,7 @@ const isSaved = (account) => isAccount(account) && (account.through === '' || is
   && typeof account.uploaded === 'string' && !Number.isNaN(Date.parse(account.uploaded));
 const isCat = (cat) => isId(cat?.id) && isName(cat.name) && KINDS.includes(cat.kind)
   && (cat.budget === undefined || (Number.isInteger(cat.budget) && cat.budget > 0));
+const isPlan = (plan) => isId(plan?.id) && isName(plan.name) && Number.isInteger(plan.cents) && plan.cents > 0 && isDate(plan.date) && isDate(plan.since);
 const isRules = (rules, isValue) => typeof rules === 'object' && rules !== null && !Array.isArray(rules)
   && Object.entries(rules).every(([key, value]) => isText(key, 60) && key.length > 0 && isValue(value));
 
@@ -688,7 +708,8 @@ export function parseBank(data) {
     && Array.isArray(data.txs) && data.txs.every(isTx)
     && Array.isArray(data.cats) && data.cats.every(isCat) && new Set(data.cats.map((cat) => cat.id)).size === data.cats.length
     && isRules(data.rules, isId) && isRules(data.fixed, (value) => typeof value === 'boolean')
-    && (data.since === '' || isDate(data.since));
+    && (data.since === '' || isDate(data.since))
+    && (data.planned === undefined || (Array.isArray(data.planned) && data.planned.every(isPlan))); // data saved before there were plans has none
   if (!ok) throw new Error('invalid bank data');
   return {
     accounts: data.accounts.map(({ id, name, bank, balance, holder, card, through, uploaded, shop, monthly = [] }) => ({
@@ -703,6 +724,7 @@ export function parseBank(data) {
     })),
     cats: data.cats.map(({ id, name, kind, budget }) => ({ id, name, kind, ...(budget && { budget }) })),
     rules: { ...data.rules }, fixed: { ...data.fixed }, since: data.since,
+    planned: (data.planned ?? []).map(({ id, name, cents, date, since }) => ({ id, name, cents, date, since })),
   };
 }
 

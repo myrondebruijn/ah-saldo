@@ -429,30 +429,45 @@ test('fixed costs: suggested after three single monthly payments, then followed 
   assert.deepEqual(bank.fixedCosts(data, '2026-10').map((each) => each.key), ['verzekeraar']);
 });
 
-test('dayRate: everyday payments set the pace, a large one, money back and a fixed cost do not', () => {
+test('dayRate: everyday payments set the pace; a large one, money back, a fixed cost and what is over do not', () => {
   const each = (count, over) => Array.from({ length: count }, () => tx(over));
   const data = withTxs(
-    // July to September, 92 days: €920 in everyday payments is €10 a day; €2,760 large less €920 back is €20 a day
+    // July to September, 92 days: €920 in everyday payments is €10 a day
     ...each(10, { cents: -9200, date: '2026-08-15' }),
     tx({ name: 'Reisbureau', cents: -276000, date: '2026-07-20' }), tx({ name: 'Reisbureau', cents: 92000, date: '2026-09-02', cat: 'reizen' }),
     // October, seven days old: €210 in everyday payments is €30 a day
     ...each(3, { cents: -7000, date: '2026-10-04' }),
     tx({ name: 'Meubelzaak', cents: -50000, date: '2026-10-02' }), // large: says nothing about tomorrow
-    tx({ name: 'Verzekeraar', cents: -15000, date: '2026-09-05' }), tx({ name: 'Verzekeraar', cents: -15000, date: '2026-10-05' }),
-    tx({ name: 'Lening', cents: -100000, date: '2026-09-28' }),
+    tx({ name: 'Verzekeraar', cents: -1500, date: '2026-09-05' }), tx({ name: 'Verzekeraar', cents: -1500, date: '2026-10-05' }),
+    tx({ name: 'Krant', cents: -4600, date: '2026-08-28' }), tx({ name: 'Krant', cents: -4600, date: '2026-09-28' }),
   );
-  data.fixed = { verzekeraar: true, lening: false }; // one is followed as a fixed cost, the other was switched off and is over
-  assert.deepEqual([...bank.ended(data, '2026-10')], ['lening']);
+  data.fixed = { verzekeraar: true, krant: false }; // one is followed as a fixed cost, the other was switched off and is over
+  assert.deepEqual([...bank.ended(data, '2026-10')], ['krant']);
   assert.deepEqual([...bank.ended(data, '2026-09')], []); // it was still paid that month
-  // a week in, this month's pace and the months before weigh the same: €20 a day, and €20 for the larger payments
-  assert.equal(bank.dayRate(data, [], '2026-10-07'), 4000);
+  // a week in, this month's pace and the months before weigh the same: €20 a day
+  assert.equal(bank.dayRate(data, [], '2026-10-07'), 2000);
   // nothing before this month: only the pace of the everyday payments so far
   assert.equal(bank.dayRate({ ...data, since: '2026-10-01' }, [], '2026-10-07'), 3000);
-  // switched off but paid again this month: it is not over, so its €1,000 of September counts as a larger payment
-  assert.equal(Math.round(bank.dayRate({ ...data, txs: [...data.txs, tx({ name: 'Lening', cents: -100000, date: '2026-10-06' })] }, [], '2026-10-07')), 5087);
-  // more came back than went out: a day costs nothing, not less than nothing
-  data.txs.push(tx({ name: 'Reisbureau', cents: 600000, date: '2026-09-03', cat: 'reizen' }));
-  assert.equal(bank.dayRate(data, [], '2026-10-07'), 0);
+  // switched off but paid again this month: it is not over, so it is an everyday payment like any other
+  assert.equal(Math.round(bank.dayRate({ ...data, txs: [...data.txs, tx({ name: 'Krant', cents: -4600, date: '2026-10-06' })] }, [], '2026-10-07')), 2379);
+});
+
+test('planned payments stay open until the bank shows a payment of about that amount', () => {
+  const data = withTxs(
+    tx({ id: 'trip', name: 'Reisbureau', cents: -205000, date: '2026-11-25' }),
+    tx({ name: 'Garage', cents: -30000, date: '2026-11-10' }), // before the tyres were planned: not them
+    tx({ name: 'Spaarrekening', cents: -30000, date: '2026-11-24', cat: 'overboeking' }), // money that only moved pays for nothing
+  );
+  const plan = (id, cents, date, since = '2026-11-20') => ({ id, name: id, cents, date, since });
+  data.planned = [plan('vakantie', 200000, '2026-11-28'), plan('banden', 30000, '2026-11-30'), plan('fiets', 60000, '2026-12-05'), plan('oud', 10000, '2026-10-15', '2026-10-01')];
+  // the trip is paid (€2,050 is within a tenth of €2,000), last month's plan is over, next month's waits
+  assert.deepEqual(bank.plannedOpen(data, '2026-11-26').map((each) => each.id), ['banden', 'fiets']);
+  // one line settles one payment
+  data.planned.push(plan('vakantie2', 200000, '2026-11-29'));
+  assert.deepEqual(bank.plannedOpen(data, '2026-11-26').map((each) => each.id), ['banden', 'fiets', 'vakantie2']);
+  // a line of the month after is no payment of this month's plan
+  data.txs.push(tx({ name: 'Bandenboer', cents: -30000, date: '2026-12-02' }));
+  assert.deepEqual(bank.plannedOpen(data, '2026-11-26').map((each) => each.id), ['banden', 'fiets', 'vakantie2']);
 });
 
 test('shiftMonth steps over year ends', () => {
@@ -466,8 +481,11 @@ test('parseBank keeps saved data and refuses anything else', () => {
   data.fixed.verzekeraar = true;
   data.cats[0].budget = 40000;
   data.txs[0].cat = 'salaris';
+  data.planned.push({ id: 'p1', name: 'Vakantie', cents: 200000, date: '2026-12-05', since: '2026-11-23' });
   assert.deepEqual(bank.parseBank(JSON.parse(JSON.stringify(data))), data);
   assert.deepEqual(bank.parseBank(JSON.parse(JSON.stringify(bank.emptyBank()))), bank.emptyBank());
+  assert.deepEqual(bank.parseBank(JSON.parse(JSON.stringify({ ...data, planned: undefined }))).planned, []); // saved before there were plans
+  assert.throws(() => bank.parseBank({ ...data, planned: [{ id: 'p2', name: 'Fiets', cents: -5, date: '2026-12-05', since: '2026-11-23' }] }));
   const bad = (change) => {
     const copy = JSON.parse(JSON.stringify(data));
     change(copy);

@@ -5,7 +5,7 @@ import {
 } from './logic.js';
 import {
   AH, LARGE, START_CATS, US, addBalance, addFile, addStarter, balanceOn, byParty, cardsOn, catchUp, decodeText, dayRate, dueOn, emptyBank, ended, figures, fixedCosts,
-  fixedSuggestions, forWhom, giftGuesses, giftsBought, giftsToFill, hasGap, heldShops, inCategory, monthOf, parseBank, payFrom, readCsv,
+  fixedSuggestions, forWhom, giftGuesses, giftsBought, giftsToFill, hasGap, heldShops, inCategory, monthOf, parseBank, payFrom, plannedOpen, readCsv,
   addLinked, readLinked, readOpenbank, ruleKey, shiftMonth, sorter,
 } from './bank.js';
 import {
@@ -1118,9 +1118,9 @@ function change(cents, text) {
 }
 
 // The running month added up day by day, and the month before as a dashed line beside it. From today two lines go
-// on to the end of the month: what is sure (the fixed costs still to come, each on its day; one that is late
-// tomorrow) and, dotted and above it, the forecast, which adds `rate` cents for every day. `past` is the bank
-// data the month before is read from.
+// on to the end of the month: what is sure (`coming`: the fixed costs and planned payments still to come, each
+// on its day; one that is late tomorrow) and, dotted and above it, the forecast, which adds `rate` cents for
+// every day. `past` is the bank data the month before is read from.
 function paceChart(month, day, coming, rate, past) {
   const before = shiftMonth(month, -1);
   const days = daysIn(month);
@@ -1128,7 +1128,7 @@ function paceChart(month, day, coming, rate, past) {
   const now = added(month, day, bank);
   const then = `${before}-01` >= bank.since ? added(before, daysIn(before), past) : [];
   const sure = Array.from({ length: days - day + 1 }, (unused, index) => now.at(-1)
-    + coming.filter((each) => Math.max(each.date, day + 1) <= day + index).reduce((sum, each) => sum + each.cost.expected, 0));
+    + coming.filter((each) => Math.max(Number(each.date.slice(8)), day + 1) <= day + index).reduce((sum, each) => sum + each.cents, 0));
   const ahead = sure.map((cents, index) => cents + Math.round(rate * index));
   const top = Math.max(100, ahead.at(-1), ...now, ...then) * 1.08;
   const step = [5000, 10000, 20000, 50000, 100000, 200000, 500000].find((each) => top / each <= 3) ?? 1000000;
@@ -1198,14 +1198,18 @@ function insightScreen() {
     <a class="row" href="#/vast"><span class="row-main">${L('Vaste lasten', 'Fixed costs')} <small>${fixed.text}</small></span>
       <span class="amount">${formatEuro(fixed.total)}</span>${icon('next')}</a>` : '';
   const catOf = sorter(bank);
-  // the fixed costs still to come this month, on the day of the month they were paid the last time
-  const coming = !open ? [] : fixed.costs.filter((cost) => !cost.paid && cost.expected)
-    .map((cost) => ({ cost, tx: lastPaid(cost.key) }))
-    .map((each) => ({ ...each, date: Math.min(Number(each.tx.date.slice(8)), days) }))
-    .sort((a, b) => a.date - b.date);
+  // What is still to come: the fixed costs of this month, each on the day of the month it was paid the last time,
+  // and the payments the user planned. A plan for a later month is listed, but only this month's count.
+  const due = !open ? [] : [
+    ...fixed.costs.filter((cost) => !cost.paid && cost.expected).map((cost) => ({ cost, tx: lastPaid(cost.key) })).map(({ cost, tx }) => ({
+      date: `${view.month}-${String(Math.min(Number(tx.date.slice(8)), days)).padStart(2, '0')}`, name: cost.name, note: catName(catOf(tx)), cents: cost.expected })),
+    ...plannedOpen(bank, isoDate()).map((plan) => ({ ...plan, note: L('Gepland', 'Planned') })),
+  ].sort((a, b) => a.date.localeCompare(b.date));
+  const coming = due.filter((each) => monthOf(each.date) === view.month);
+  const waiting = coming.reduce((sum, each) => sum + each.cents, 0);
   const daysLeft = days - day;
   // what the month has cost at its end for sure, and what every day still to come probably adds to that
-  const sure = now.spending + fixed.waiting;
+  const sure = now.spending + waiting;
   const rate = open ? dayRate(bank, state.purchases, isoDate()) : 0;
   const ahead = sure + Math.round(rate * daysLeft);
   const room = average3 - sure; // what may still go out and stay under the average
@@ -1220,7 +1224,7 @@ function insightScreen() {
   // net worth at the end of each month; the running month stands at today. The chart marks a month tapped on it, else the month on screen.
   const points = chartMonths().map((month) => ({ id: month, name: monthShort(month), cents: worthOn(month === thisMonth() ? '9999' : `${month}-31`) }));
   const worthMonth = [view.worth, view.month].find((month) => points.some((point) => point.id === month)) ?? points.at(-1)?.id;
-  const links = (coming.length ? '' : fixedRow) + savedRow(from, to);
+  const links = (open ? '' : fixedRow) + savedRow(from, to); // a running month shows the fixed costs with what is still to come
   if (!bank.accounts.length) {
     return { html: `<header class="large-title"><h1>${L('Inzicht', 'Insight')}</h1></header>
       ${blank(L('Nog niets te zien', 'Nothing to see yet'), L('Upload eerst je bankbestanden op Overzicht.', 'Upload your bank files on Overview first.'))}` };
@@ -1270,26 +1274,28 @@ function insightScreen() {
               <h3>${L('Onder je gemiddelde blijven', 'Stay under your average')}</h3>
               <p class="tile-total">${wholeEuro(room / daysLeft)} <small>${L('per dag', 'a day')}</small></p>
               <p class="footnote">${daysLeft === 1 ? L('voor de laatste dag', 'for the last day') : L(`voor de ${daysLeft} dagen die over zijn`, `for the ${daysLeft} days left`)}${
-                fixed.waiting ? L(', na de vaste lasten die nog komen', ', after the fixed costs still to come') : ''}</p>
+                waiting ? L(', na wat nog komt', ', after what is still to come') : ''}</p>
             </section>` : `
             <section class="tile">
               <h3>${L('Boven je gemiddelde', 'Over your average')}</h3>
               <p class="tile-total over-text">${wholeEuro(-room)}</p>
-              <p class="footnote">${fixed.waiting ? L('al, met de vaste lasten die nog komen', 'already, with the fixed costs still to come') : L('al, deze maand', 'already, this month')}</p>
+              <p class="footnote">${waiting ? L('al, met wat nog komt', 'already, with what is still to come') : L('al, deze maand', 'already, this month')}</p>
             </section>`}
         </div>
-        <p class="group-note">${L(`Zeker is wat er al uit is plus de vaste lasten die nog komen. De verwachting telt daar ${wholeEuro(rate)} per dag bij op: je kleine uitgaven in het tempo van deze maand en de drie ervoor, plus wat uitgaven vanaf ${wholeEuro(LARGE)} in die drie maanden gemiddeld per dag kostten. Eén grote uitgave deze maand telt dus niet als tempo.`,
-          `For sure is what went out already plus the fixed costs still to come. The forecast adds ${wholeEuro(rate)} a day to that: your small purchases at the pace of this month and the three before, plus what purchases of ${wholeEuro(LARGE)} or more came to per day in those three months. So one large purchase this month does not count as a pace.`)}${
+        <p class="group-note">${L(`Zeker is wat er al uit is plus wat nog komt: je vaste lasten en wat je hebt gepland. De verwachting telt daar ${wholeEuro(rate)} per dag bij op: je kleine uitgaven (onder ${wholeEuro(LARGE)}), in het tempo van deze maand en de drie ervoor. Wanneer de volgende grote uitgave komt is uit eerdere maanden niet te voorspellen, dus die telt pas mee als je haar plant.`,
+          `For sure is what went out already plus what is still to come: your fixed costs and what you planned. The forecast adds ${wholeEuro(rate)} a day to that: your small purchases (under ${wholeEuro(LARGE)}), at the pace of this month and the three before. When the next large purchase comes cannot be told from earlier months, so it only counts once you plan it.`)}${
           average3 ? ` ${L('Je gemiddelde is wat er de drie maanden ervoor gemiddeld uitging.', 'Your average is what went out on average in the three months before.')}` : ''}${
           over.size ? ` ${L('Een vaste last die is gestopt telt in de maanden ervoor niet mee.', 'A fixed cost that has stopped is left out of the months before.')}` : ''}</p>
-        ${coming.length ? `
-          <h2 class="section split-head"><span>${L('Vaste lasten die nog komen', 'Fixed costs still to come')}</span><span>${formatEuro(fixed.waiting)}</span></h2>
-          <ul class="group">${coming.map(({ cost, tx, date }) => `
-            <li class="row"><span class="date-badge"><b>${date}</b>${monthShort(view.month)}</span>
-              <span class="row-main">${esc(cost.name)} <small>${catName(catOf(tx))}</small></span>
-              <span class="amount quiet">${formatEuro(cost.expected)}</span></li>`).join('')}
-            <li>${fixedRow}</li>
-          </ul>` : ''}` : ''}
+        <h2 class="section split-head"><span>${L('Wat nog komt', 'Still to come')}</span><span>${formatEuro(waiting)}</span></h2>
+        <ul class="group">${due.map((each) => {
+          const row = `<span class="date-badge"><b>${Number(each.date.slice(8))}</b>${monthShort(monthOf(each.date))}</span>
+            <span class="row-main">${esc(each.name)} <small>${each.note}</small></span>
+            <span class="amount quiet">${formatEuro(each.cents)}</span>`;
+          return each.id ? `<li><button class="row" data-action="unplan" data-id="${esc(each.id)}">${row}</button></li>` : `<li class="row">${row}</li>`;
+        }).join('')}
+          <li><button class="row tint" data-action="plan">${L('Betaling plannen', 'Plan a payment')}</button></li>
+          ${fixedRow && `<li>${fixedRow}</li>`}
+        </ul>` : ''}
       ${spent.length ? `
         <h2 class="section split-head"><span>${L('Uitgaven per categorie', 'Spending per category')}</span>${usual ? `<span>${L('t.o.v. normaal', 'vs usual')}</span>` : ''}</h2>
         <ul class="group">${spent.map(([id, cents]) => `
@@ -2096,6 +2102,8 @@ async function askPayment(account) {
   const form = $('payDialog').querySelector('form');
   form.reset();
   form.elements.date.value = isoDate();
+  $('payTitle').textContent = L('Betaling', 'Payment');
+  $('payMonthly').hidden = false;
   $('payNote').textContent = L(`Uit het saldo bij ${account.shop}`, `From the balance at ${account.shop}`);
   let pay;
   const answer = await openDialog($('payDialog'), () => {
@@ -2111,6 +2119,29 @@ async function askPayment(account) {
   const [first] = pay.monthly ? catchUp(bank, isoDate()) : [payFrom(bank, account, pay.date, -pay.cents, pay.name)];
   saveBank();
   if (first && !sorter(bank)(first)) await askTx(first);
+}
+
+// Asks for a payment that is still to come. It counts in its month until the bank shows it.
+async function askPlan() {
+  const form = $('payDialog').querySelector('form');
+  form.reset();
+  form.elements.date.value = isoDate();
+  $('payTitle').textContent = L('Betaling plannen', 'Plan a payment');
+  $('payMonthly').hidden = true;
+  $('payNote').textContent = L('Telt mee in de maand van de datum, tot de bank een betaling van ongeveer dit bedrag laat zien.',
+    'Counts in the month of its date, until the bank shows a payment of about this amount.');
+  let plan;
+  const answer = await openDialog($('payDialog'), () => {
+    const { name, amount, date } = form.elements;
+    plan = { name: name.value.trim(), cents: parseEuro(amount.value), date: date.value };
+    if (!isName(plan.name)) return L('Vul in waarvoor het is.', 'Enter what it is for.');
+    if (!plan.cents) return ENTER_AMOUNT;
+    if (!isDate(plan.date)) return ENTER_DATE;
+    return plan.date < isoDate() ? L('Kies vandaag of een latere dag.', 'Choose today or a later day.') : '';
+  });
+  if (answer !== 'ok' || !plan) return; // never save a plan that was not filled in: saved data must stay readable
+  bank.planned.push({ id: crypto.randomUUID().slice(0, 8), ...plan, since: isoDate() });
+  saveBank();
 }
 
 // Adds a category, or edits `cat` when given. An amount per month makes a spending category a pot.
@@ -2459,6 +2490,13 @@ const actions = {
     bank.txs = bank.txs.filter((tx) => tx.acc !== account.id);
     saveBank();
     actions.back();
+  },
+  plan() { askPlan(); },
+  async unplan(card, button) {
+    const plan = bank.planned.find((each) => each.id === button.dataset.id);
+    if (!plan || !await ask(L(`${plan.name} van ${formatEuro(plan.cents)} niet meer plannen?`, `Stop planning ${plan.name} of ${formatEuro(plan.cents)}?`), L('Verwijderen', 'Remove'))) return;
+    bank.planned = bank.planned.filter((each) => each !== plan);
+    saveBank();
   },
   fixedYes(card, button) { bank.fixed[button.dataset.id] = true; saveBank(); },
   fixedNo(card, button) { bank.fixed[button.dataset.id] = false; saveBank(); },
