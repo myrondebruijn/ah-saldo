@@ -1822,10 +1822,13 @@ function show() {
   app.focus({ preventScroll: true });
 }
 
-// Redraws the same screen after a control on it was used, and hands the focus back to that control.
+// Redraws the same screen after a control on it was used, and hands the focus back to that control. The control
+// stays where it was on the screen, even when what is above it grows or shrinks (another month shows other parts).
 function redraw(control) {
+  const top = document.querySelector(control)?.getBoundingClientRect().top;
   render();
   const again = document.querySelector(control);
+  if (top !== undefined && again) scrollBy(0, again.getBoundingClientRect().top - top);
   if (again && !again.disabled) again.focus({ preventScroll: true });
   else app.focus({ preventScroll: true });
 }
