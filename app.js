@@ -4,8 +4,8 @@ import {
   validCode, validNumber,
 } from './logic.js';
 import {
-  START_CATS, US, addFile, addStarter, balanceOn, byParty, cardsOn, decodeText, emptyBank, figures, fixedCosts, fixedSuggestions,
-  forWhom, hasGap, inCategory, monthOf, parseBank, readCsv, readOpenbank, ruleKey, shiftMonth, sorter,
+  AH, START_CATS, US, addFile, addStarter, balanceOn, byParty, cardsOn, decodeText, emptyBank, figures, fixedCosts, fixedSuggestions,
+  forWhom, giftGuesses, giftsBought, giftsToFill, hasGap, inCategory, monthOf, parseBank, readCsv, readOpenbank, ruleKey, shiftMonth, sorter,
 } from './bank.js';
 
 const KEY = 'ah-saldo'; // the app's first name; changing this key would hide everything already saved
@@ -22,11 +22,11 @@ const KIND = { start: L('Beginsaldo', 'Starting balance'), pay: L('Betaling', 'P
 const SHOPS = ['AH', 'Plus', 'Jumbo', 'Dirk', 'Lidl', 'Anders'];
 // the default names are saved in Dutch, so a language switch leaves the data alone
 const ENGLISH_NAMES = new Map([
-  [US, 'Us'], ['Anders', 'Other'], ['Boodschappen', 'Groceries'], ['Auto', 'Car'], ['Verzekering & bank', 'Insurance & bank'],
-  ['Abonnementen', 'Subscriptions'], ['Verzekering & zorg', 'Insurance & health'], ['Winkelen', 'Shopping'],
-  ['Werk & bedrijf', 'Work & business'], ['Aflossing lening', 'Loan repayment'],
+  [US, 'Us'], ['Anders', 'Other'], ['Boodschappen', 'Groceries'], ['Uit eten', 'Eating out'], ['Abonnementen', 'Subscriptions'],
+  ['Auto & vervoer', 'Car & transport'], ['Verzekering & zorg', 'Insurance & health'], ['Winkelen', 'Shopping'], ['Cadeaukaarten', 'Gift cards'],
   ['Reizen', 'Travel'], ['Voor anderen', 'For others'], ['Overig', 'Other'], ['Salaris', 'Salary'], ['Overig inkomen', 'Other income'],
-  ['Overboeking', 'Transfer'], ['Cadeaukaarten', 'Gift cards'],
+  ['Overboeking', 'Transfer'], ['Werk & bedrijf', 'Work & business'], ['Aflossing lening', 'Loan repayment'],
+  ['Creditcard (Amex)', 'Credit card (Amex)'],
 ]);
 const shown = (name) => (lang === 'en' && ENGLISH_NAMES.get(name)) || name;
 const UNITS = { week: 'Week', month: L('Maand', 'Month'), year: L('Jaar', 'Year') };
@@ -226,6 +226,7 @@ function cardsScreen() {
         <a class="row" href="#/uitgaven">
           <span class="row-main">${L('Bij de kassa <small>Met kaarten betaald deze maand</small>', 'At the till <small>Paid with cards this month</small>')}</span> ${formatEuro(thisMonthPaid)}${icon('next')}</a>
         ${spent ? `<a class="row" href="#/archief"><span class="row-main">${L('Lege kaarten', 'Empty cards')}</span> ${spent}${icon('next')}</a>` : ''}
+        ${savedRow('', '9999')}
       </div>`,
   };
 }
@@ -305,14 +306,16 @@ const meterBar = (share, { over = false, pace = null, rank = false } = {}) => `
 
 // The row of a transaction; a tap opens the sheet that sorts it. The line under the name leaves out what the
 // screen around it already says: the category on a category's own screen, the account when one is chosen.
-function txRow(tx, catOf, { category = true, account = true } = {}) {
+function txRow(tx, catOf, { category = true, account = true, toFill } = {}) {
   const cat = catOf(tx);
   const others = cat === 'boodschappen' ? (tx.shares ?? []).filter((share) => share.who !== US).map((share) => esc(shown(share.who))) : [];
+  const gift = tx.gift ? `${esc(tx.gift.shop)} ${formatEuro(tx.gift.value)}${cat === 'cadeaukaarten' && tx.gift.shop === AH ? ` · ${L('op de kaart', 'on the card')}` : ''}`
+    : toFill?.has(tx.id) ? `<span class="todo">${L('winkel invullen', 'fill in the shop')}</span>` : '';
   return `
     <li><button class="row tx" data-action="tx" data-id="${esc(tx.id)}">
       <span class="row-main">${esc(tx.name)} <small>${dayShort(tx.date)}${
         category ? ` · <span${cat ? '' : ' class="todo"'}>${catName(cat)}</span>` : ''}${
-        others.length ? ` · ${L('ook voor', 'also for')} ${others.join(', ')}` : ''}${
+        others.length ? ` · ${L('ook voor', 'also for')} ${others.join(', ')}` : ''}${gift ? ` · ${gift}` : ''}${
         account ? ` · ${esc(accountById(tx.acc)?.name ?? '')}` : ''}</small></span>
       <span class="amount${tx.cents > 0 ? ' plus' : ''}">${signed(tx.cents)}</span>
     </button></li>`;
@@ -330,6 +333,57 @@ function potRow(cat, spent, month) {
       <span class="${left < 0 ? 'over-text' : ''}">${left < 0 ? L(`${formatEuro(-left)} erover`, `${formatEuro(-left)} over`) : L(`nog ${formatEuro(left)}`, `${formatEuro(left)} left`)}</span>
       ${meterBar(spent / cat.budget, { over: left < 0, pace: running ? day / days : null })}
     </a></li>`;
+}
+
+// ---------- gift cards bought ----------
+
+const giftIds = () => new Set(giftsToFill(bank).map((tx) => tx.id));
+const giftSum = (shops) => shops.reduce((sum, shop) => ({ value: sum.value + shop.value, paid: sum.paid + shop.paid }), { value: 0, paid: 0 });
+const giftText = ({ value, paid }) => L(`${formatEuro(value)} aan kaarten voor ${formatEuro(paid)}`, `${formatEuro(value)} of cards for ${formatEuro(paid)}`);
+const sinceText = () => (bank.since ? `${L('Sinds', 'Since')} ${monthName(monthOf(bank.since))}` : L('Alles bij elkaar', 'All together'));
+
+// the way to the gift card payments that do not say yet what they bought
+function fillRow() {
+  const count = giftsToFill(bank).length;
+  return count ? `
+    <button class="row" data-action="fillGifts"><span class="row-main">${L('Cadeaukaarten invullen', 'Fill in gift cards')}
+      <small>${L('Winkel en waarde', 'Shop and value')}</small></span>
+      <span class="amount">${L(plural(count, 'aankoop', 'aankopen'), plural(count, 'purchase', 'purchases'))}</span>${icon('next')}</button>` : '';
+}
+
+// what the gift cards bought from `from` up to `to` saved, as a row that leads to the gift card category
+function savedRow(from, to) {
+  const sum = giftSum(giftsBought(bank, from, to));
+  return sum.value ? `
+    <a class="row" href="#/categorie/cadeaukaarten"><span class="row-main">${L('Bespaard met cadeaukaarten', 'Saved with gift cards')} <small>${giftText(sum)}</small></span>
+      <span class="amount">${formatEuro(sum.value - sum.paid)}</span>${icon('next')}</a>` : '';
+}
+
+// What the gift card category shows on top of a category's own figures: what the cards saved, in the month on
+// screen and in all that is counted, and every shop cards were bought for. The AH row leads to the cards themselves.
+function giftSections(from, to) {
+  const all = giftsBought(bank, '', '9999');
+  if (!all.length) return '';
+  const whole = giftSum(all).value;
+  const saved = (label, sum) => `
+    <li class="row"><span class="row-main">${label} <small>${giftText(sum)}</small></span><span class="amount">${formatEuro(sum.value - sum.paid)}</span></li>`;
+  const shopRow = (shop) => {
+    const percent = ((shop.value - shop.paid) / shop.value * 100).toLocaleString(LOCALE, { maximumFractionDigits: 1 });
+    const inside = `
+      <span class="row-main">${esc(shop.shop)} <small class="under">${shop.shop === AH
+        ? `${L('nu', 'now')} ${formatEuro(cardTotal())} ${L('op de kaarten', 'on the cards')} · ${formatEuro(shop.value - shop.paid)} ${L('bespaard', 'saved')}`
+        : `${formatEuro(shop.value - shop.paid)} ${L('bespaard', 'saved')} · ${percent}%`}</small></span>
+      <span>${formatEuro(shop.value)}</span>${meterBar(shop.value / whole, { rank: true })}`;
+    return shop.shop === AH ? `<li><a class="row meter-row" href="#/kaarten">${inside}</a></li>` : `<li class="row meter-row">${inside}</li>`;
+  };
+  return `
+    <h2 class="section">${L('Bespaard', 'Saved')}</h2>
+    <ul class="group">
+      ${saved(`${L('In', 'In')} ${monthName(view.month)}`, giftSum(giftsBought(bank, from, to)))}
+      ${saved(sinceText(), giftSum(all))}
+    </ul>
+    <h2 class="section">${L('Gekocht per winkel', 'Bought per shop')} · ${sinceText()}</h2>
+    <ul class="group">${all.map(shopRow).join('')}</ul>`;
 }
 
 const pots = () => bank.cats.filter((cat) => cat.kind === 'out' && cat.budget);
@@ -408,6 +462,7 @@ function overviewScreen() {
       <div class="group">
         ${open ? `<a class="row" href="#/categorie/open"><span class="row-main">${L('Nog indelen', 'To sort')}</span>
           <span class="amount">${L(plural(open, 'transactie', 'transacties'), plural(open, 'transaction', 'transactions'))}</span>${icon('next')}</a>` : ''}
+        ${fillRow()}
         <a class="row" href="#/vast"><span class="row-main">${L('Vaste lasten', 'Fixed costs')}
           <small>${fixed.costs.length ? fixed.text : suggested ? L(plural(suggested, 'voorstel', 'voorstellen'), plural(suggested, 'suggestion', 'suggestions')) : L('Nog geen', 'None yet')}</small></span>
           <span class="amount">${fixed.costs.length ? formatEuro(fixed.total) : ''}</span>${icon('next')}</a>
@@ -495,6 +550,8 @@ function categoryScreen(id) {
   const whole = Math.max(1, fromCards + parties.reduce((sum, party) => sum + size(party), 0)); // the bars are shares of this
   const months = Array.from({ length: 6 }, (unused, index) => shiftMonth(view.month >= shiftMonth(thisMonth(), -5) ? thisMonth() : view.month, index - 5));
   const shownRows = txs.slice(0, view.rows);
+  const gifts = cat?.id === 'cadeaukaarten'; // everything here was paid to the shop that sells the cards: the shops the cards are for say more
+  const toFill = giftIds();
   return {
     html: `
       <header class="navbar">
@@ -518,7 +575,9 @@ function categoryScreen(id) {
         <ul class="group">${who.map(([name, cents]) => `
           <li class="row meter-row"><span class="row-main">${esc(shown(name))}</span>
             <span>${formatEuro(cents)}</span>${meterBar(Math.max(0, cents) / whoTotal, { rank: true })}</li>`).join('')}</ul>` : ''}
+      ${gifts ? `${fillRow() && `<div class="group">${fillRow()}</div>`}${giftSections(from, to)}` : ''}
       ${parties.length || fromCards ? `
+        ${gifts ? '' : `
         <h2 class="section">${cat ? L('Bij wie', 'Where') : L('Per naam, grootste eerst', 'Per name, largest first')}</h2>
         <ul class="group">
           ${fromCards ? `<li><a class="row meter-row" href="${forOthers ? '#/categorie/boodschappen' : '#/uitgaven'}">
@@ -530,12 +589,14 @@ function categoryScreen(id) {
               <span class="${cat ? '' : party.cents > 0 ? 'plus' : ''}">${cat && cat.kind !== 'none' ? formatEuro(sign * party.cents) : signed(party.cents)}</span>
               ${meterBar(size(party) / whole, { rank: true })}
             </button></li>`).join('')}
-        </ul>
+        </ul>`}
         <h2 class="section">${L('Transacties', 'Transactions')}</h2>
-        <ul class="group">${shownRows.map((tx) => txRow(tx, catOf, { category: false })).join('')}</ul>
+        <ul class="group">${shownRows.map((tx) => txRow(tx, catOf, { category: false, toFill })).join('')}</ul>
         ${txs.length > shownRows.length ? `<div class="group"><button class="row tint" data-action="moreRows">${L('Toon meer', 'Show more')}</button></div>` : ''}
         ${cat?.id === 'boodschappen' ? `<p class="group-note">${L('Was iets, of een deel ervan, voor iemand anders? Tik op de transactie en kies Voor wie.',
-          'Was something, or part of it, for someone else? Tap the transaction and choose For whom.')}</p>` : ''}`
+          'Was something, or part of it, for someone else? Tap the transaction and choose For whom.')}</p>` : ''}
+        ${gifts ? `<p class="group-note">${L(`Een kaart van ${AH} telt hier niet mee: het geld staat op de kaart en telt als boodschappen zodra je ermee betaalt.`,
+          `A card for ${AH} does not count here: the money is on the card and counts as groceries once you pay with it.`)}</p>` : ''}`
       : blank(cat ? L('Niets in deze maand', 'Nothing this month') : L('Alles is ingedeeld', 'Everything is sorted'))}`,
   };
 }
@@ -648,6 +709,7 @@ function insightScreen() {
       ${yearly || !fixed.costs.length ? '' : `
         <div class="group"><a class="row" href="#/vast"><span class="row-main">${L('Vaste lasten', 'Fixed costs')} <small>${fixed.text}</small></span>
           <span class="amount">${formatEuro(fixed.total)}</span>${icon('next')}</a></div>`}
+      ${savedRow(from, to) && `<div class="group">${savedRow(from, to)}</div>`}
       ${points.length ? `
         <h2 class="section">${L('Vermogen', 'Net worth')}</h2>
         <section class="summary worth">
@@ -677,10 +739,11 @@ function txList() {
     .sort((a, b) => b.date.localeCompare(a.date));
   if (!found.length) return blank(L('Niets gevonden', 'Nothing found'));
   const months = new Map();
+  const toFill = giftIds();
   for (const tx of found.slice(0, view.rows)) months.set(monthOf(tx.date), [...(months.get(monthOf(tx.date)) ?? []), tx]);
   return `${[...months].map(([month, txs]) => `
     <h2 class="section">${monthName(month)}</h2>
-    <ul class="group">${txs.map((tx) => txRow(tx, catOf, { account: view.acc === 'all' })).join('')}</ul>`).join('')}
+    <ul class="group">${txs.map((tx) => txRow(tx, catOf, { account: view.acc === 'all', toFill })).join('')}</ul>`).join('')}
     ${found.length > view.rows ? `<div class="group"><button class="row tint" data-action="moreRows">${L('Toon meer', 'Show more')} (${found.length - view.rows})</button></div>` : ''}`;
 }
 
@@ -767,8 +830,8 @@ function categoriesScreen() {
         <ul class="group">${bank.cats.filter((cat) => cat.kind === kind).map((cat) => `
           <li><button class="row" data-action="editCat" data-id="${cat.id}"><span class="row-main">${esc(shown(cat.name))}</span>
             <span class="amount quiet">${cat.budget ? `${formatEuro(cat.budget)} ${L('per maand', 'a month')}` : ''}</span>${icon('next')}</button></li>`).join('')}</ul>`).join('')}
-      <p class="group-note">${L('"Telt niet mee" is voor geld dat alleen verhuist: tussen je eigen rekeningen, of naar het saldo van je cadeaukaarten.',
-        '"Does not count" is for money that only moves: between your own accounts, or onto your gift cards.')}</p>`,
+      <p class="group-note">${L('"Telt niet mee" is voor geld dat alleen verhuist, zoals tussen je eigen rekeningen.',
+        '"Does not count" is for money that only moves, such as between your own accounts.')}</p>`,
   };
 }
 
@@ -1238,8 +1301,45 @@ async function askWho(purchase) {
   save();
 }
 
+// Asks which shop a payment for gift cards was for and what the cards are worth. The app's own guess is filled
+// in when the price fits a shop bought before; choosing another shop fills in the value its discount gives.
+// `more` is how many payments wait after this one. Resolves with { shop, value }, or null when cancelled.
+async function pickGift(tx, current, more = 0) {
+  const form = $('giftDialog').querySelector('form');
+  const guesses = giftGuesses(bank, -tx.cents);
+  if (!guesses.some((guess) => guess.shop === AH)) guesses.push({ shop: AH, value: 0 });
+  const first = current ?? (guesses[0].value % 500 === 0 && guesses[0].value > 0 ? guesses[0] : { shop: '', value: 0 });
+  const listed = guesses.some((guess) => guess.shop === first.shop);
+  const otherShop = L('Andere winkel', 'Other shop');
+  const choice = (shop, label, chosen) => `
+    <label class="row choice"><input type="radio" name="shop" value="${esc(shop)}"${chosen ? ' checked' : ''}>${label}${icon('check')}</label>`;
+  $('giftNote').textContent = `${formatEuro(-tx.cents)} ${L('betaald aan', 'paid to')} ${tx.name} ${L('op', 'on')} ${dayShort(tx.date)}${
+    more ? ` · ${L(`hierna nog ${more}`, `${more} more after this`)}` : ''}`;
+  $('giftShops').innerHTML = guesses.map(({ shop }) => choice(shop, `<span class="row-main">${esc(shop)}</span>`, shop === first.shop)).join('')
+    + choice('', `<input class="row-main" name="other" maxlength="30" autocomplete="off" placeholder="${otherShop}" aria-label="${otherShop}"
+      value="${listed ? '' : esc(first.shop)}">`, !listed && Boolean(first.shop));
+  const { other, value } = form.elements;
+  value.value = first.value ? euroInput(first.value) : '';
+  other.oninput = () => { other.closest('label').querySelector('[type="radio"]').checked = true; }; // typing a new shop chooses it
+  $('giftShops').onchange = () => {
+    const guess = guesses.find((each) => each.shop === form.elements.shop.value);
+    if (guess?.value) value.value = euroInput(guess.value);
+  };
+  let gift;
+  const answer = await openDialog($('giftDialog'), () => {
+    const typed = form.elements.shop.value || other.value.trim();
+    const shop = guesses.find((guess) => guess.shop.toLowerCase() === typed.toLowerCase())?.shop ?? typed; // one spelling per shop
+    if (!isName(shop)) return L('Kies een winkel of vul er een in.', 'Choose a shop or type one.');
+    if (!parseEuro(value.value)) return ENTER_AMOUNT;
+    gift = { shop, value: parseEuro(value.value) };
+    return '';
+  });
+  return answer === 'ok' ? gift : null;
+}
+
 // Sorts a transaction: a category for it alone, or for everything from its counterparty, and whether
-// that counterparty is a fixed cost. Groceries can also be split between people, as a gift card payment can.
+// that counterparty is a fixed cost. Groceries can also be split between people, as a gift card payment can,
+// and a payment for gift cards can say what it bought.
 async function askTx(tx) {
   const form = $('txDialog').querySelector('form');
   const key = ruleKey(tx.name); // empty for a name without letters: then there is nothing to hang a rule on
@@ -1264,14 +1364,29 @@ async function askTx(tx) {
     $('txWhoGroup').hidden = tx.cents >= 0 || form.elements.cat.value !== 'boodschappen';
     $('txWhoNow').textContent = shares.map((share) => shown(share.who)).join(', ');
   };
-  $('txCats').onchange = showWho;
+  // "Cadeaukaart" shows while the gift card category is chosen, and on a card that counts somewhere else as long
+  // as it stays there; sorting a payment out of where it was says it bought no card after all
+  let { gift } = tx;
+  const keepsGift = () => tx.cents < 0 && (form.elements.cat.value === 'cadeaukaarten' || (Boolean(gift) && form.elements.cat.value === before));
+  const showGift = () => {
+    $('txGiftGroup').hidden = !keepsGift();
+    $('txGiftNow').textContent = gift ? `${gift.shop} · ${formatEuro(gift.value)}` : L('Invullen', 'Fill in');
+  };
+  $('txCats').onchange = () => { showWho(); showGift(); };
   $('txWho').onclick = async () => {
     shares = await pickShares(-tx.cents, `${formatEuro(-tx.cents)} ${L('bij', 'at')} ${tx.name}`, shares) ?? shares;
     showWho();
   };
+  $('txGift').onclick = async () => {
+    gift = await pickGift(tx, gift) ?? gift;
+    showGift();
+  };
   showWho();
+  showGift();
   if (await openDialog($('txDialog')) !== 'ok') return;
   const cat = form.elements.cat.value;
+  if (keepsGift() && gift) tx.gift = gift;
+  else delete tx.gift;
   if (cat === 'boodschappen' && tx.cents < 0 && shares.some((share) => share.who !== US)) tx.shares = shares;
   else delete tx.shares;
   if (all.checked) {
@@ -1403,7 +1518,9 @@ async function importBankFiles() {
     : starter ? L('Categorieën en regels toegevoegd.', 'Categories and rules added.')
     : L('Niets nieuws: alles stond er al in.', 'Nothing new: it was all there already.');
   const cardNews = newCards ? L(`${plural(newCards, 'kaart', 'kaarten')} toegevoegd.`, `${plural(newCards, 'card', 'cards')} added.`) : '';
-  toast([news, cardNews, failed.length ? `${L('Niet gelezen', 'Not read')}: ${failed.join(', ')}.` : ''].filter(Boolean).join(' '));
+  const toFill = changed ? giftsToFill(bank).length : 0;
+  const giftNews = toFill ? L(`Vul op Overzicht nog ${plural(toFill, 'cadeaukaart', 'cadeaukaarten')} in.`, `${plural(toFill, 'gift card', 'gift cards')} to fill in on Overview.`) : '';
+  toast([news, cardNews, giftNews, failed.length ? `${L('Niet gelezen', 'Not read')}: ${failed.join(', ')}.` : ''].filter(Boolean).join(' '));
 }
 
 // ---------- actions ----------
@@ -1559,6 +1676,16 @@ const actions = {
     if (name === null) return;
     account.name = name;
     saveBank();
+  },
+  // one sheet after the other for the gift card payments that do not say yet what they bought; cancelling stops
+  async fillGifts() {
+    const open = giftsToFill(bank);
+    for (const [index, tx] of open.entries()) {
+      const gift = await pickGift(tx, undefined, open.length - index - 1);
+      if (!gift) return;
+      tx.gift = gift;
+      saveBank();
+    }
   },
   fixedYes(card, button) { bank.fixed[button.dataset.id] = true; saveBank(); },
   fixedNo(card, button) { bank.fixed[button.dataset.id] = false; saveBank(); },

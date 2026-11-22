@@ -188,6 +188,11 @@ test('a transaction is sorted by its own choice, then the rule, then what the ap
   assert.equal(catOf(tx({ name: 'KPN B.V.' })), 'abonnementen');
   assert.equal(catOf(tx({ name: 'Disney Plus' })), 'abonnementen');
   assert.equal(catOf(tx({ name: 'Canal Plus' })), '');
+  assert.equal(catOf(tx({ name: "McDonald's Dorp" })), 'uiteten');
+  assert.equal(catOf(tx({ name: 'BCK*Mc Donalds Dorp' })), 'uiteten');
+  assert.equal(catOf(tx({ name: 'NS Reizigers B.V.' })), 'auto');
+  assert.equal(catOf(tx({ name: 'NLOVAB1CDEFGH2I3J4' })), 'auto'); // a bus trip paid with the bank card
+  assert.equal(catOf(tx({ name: 'NS Vastgoed' })), '');
 });
 
 test('figures: income, spending, money back, neutral money and what is not sorted yet', () => {
@@ -197,9 +202,9 @@ test('figures: income, spending, money back, neutral money and what is not sorte
   data.rules['aab inz tikkie'] = 'fun'; // money back lowers what was spent on fun
   const all = bank.figures(data, [], '2026-06-01', '2026-08-01');
   assert.equal(all.income, 300000);
-  assert.equal(all.spending, 2500 + 4510 + 10000 - 2000); // J. Jansen is not sorted yet and counts as spending
+  assert.equal(all.spending, 2500 + 4510 + 10000 + 4700 - 2000); // J. Jansen is not sorted yet and counts as spending
   assert.equal(all.open, 1);
-  assert.deepEqual([...all.byCat].sort(), [['', 10000], ['boodschappen', 4510], ['fun', 500], ['salaris', 300000]]);
+  assert.deepEqual([...all.byCat].sort(), [['', 10000], ['boodschappen', 4510], ['cadeaukaarten', 4700], ['fun', 500], ['salaris', 300000]]);
   const june = bank.figures(data, [], '2026-06-01', '2026-07-01');
   assert.equal(june.byCat.get('fun'), 2500);
   data.since = '2026-06-27';
@@ -218,6 +223,53 @@ test('figures: a gift card payment counts its card part, and a share for someone
   assert.deepEqual(run(purchase(3000, [{ who: 'Oma', cents: 5000 }])), [3000, 0, 3000]); // no more than the cards paid
   assert.deepEqual(run(purchase(0, [{ who: 'Wij', cents: 5000 }])), [0, 0, 0]); // all pin: the bank statement has it
   assert.deepEqual(run({ ...purchase(3000, [{ who: 'Wij', cents: 5000 }]), at: '2026-08-01T12:00:00.000Z' }), [0, 0, 0]);
+});
+
+test('gift cards: a card for another shop is spending, an AH card is balance, and both say what they saved', () => {
+  const wissel = (id, date, cents, gift) => tx({ id, date, cents, name: 'Wissel Nederland B.V.', ...(gift && { gift }) });
+  const data = withTxs(
+    wissel('a', '2026-07-02', -4700, { shop: 'Boekenbon', value: 5000 }),
+    wissel('b', '2026-07-03', -4433, { shop: 'Albert Heijn', value: 4500 }),
+    wissel('c', '2026-07-04', -9400, { shop: 'Boekenbon', value: 10000 }),
+    wissel('d', '2026-07-05', -9800), // paid and paid back: it bought nothing
+    tx({ id: 'e', date: '2026-07-06', cents: 9800, name: 'Wissel Nederland BV' }),
+    wissel('f', '2026-07-07', -9800), // the same amount again, and this one stayed
+    wissel('g', '2026-06-20', -3940, { shop: 'Albert Heijn', value: 4000 }),
+  );
+  data.txs.at(-1).cat = 'boodschappen'; // an AH card from before the app paid at the till: groceries on the day it was bought
+  const sum = bank.figures(data, [], '2026-06-01', '2026-08-01');
+  assert.equal(sum.byCat.get('cadeaukaarten'), 4700 + 9400 + 9800 - 9800 + 9800); // the AH card of 44,33 is not in it
+  assert.equal(sum.byCat.get('boodschappen'), 3940);
+  assert.equal(sum.spending, 4700 + 9400 + 9800 + 3940);
+  assert.deepEqual(bank.giftsBought(data, '2026-07-01', '2026-08-01'), [
+    { shop: 'Boekenbon', value: 15000, paid: 14100, count: 2 }, { shop: 'Albert Heijn', value: 4500, paid: 4433, count: 1 }]);
+  assert.equal(bank.giftsBought(data, '', '9999')[1].value, 8500); // a card counts whatever category its payment is in
+  data.since = '2026-07-03';
+  assert.deepEqual(bank.giftsBought(data, '', '9999').map((shop) => shop.value), [10000, 4500]);
+  assert.deepEqual(bank.giftsToFill(data).map((each) => each.id), ['f']);
+  data.txs.find((each) => each.id === 'f').cat = 'winkelen'; // sorted somewhere else: not a gift card after all
+  assert.deepEqual(bank.giftsToFill(data), []);
+  assert.deepEqual(bank.parseBank(JSON.parse(JSON.stringify(data))).txs[0].gift, { shop: 'Boekenbon', value: 5000 });
+  const bad = (gift, cents = -4700) => assert.throws(() => bank.parseBank({ ...bank.emptyBank(), txs: [tx({ cents, gift })] }));
+  bad({ shop: '', value: 5000 });
+  bad({ shop: 'Boekenbon', value: 0 });
+  bad({ shop: 'Boekenbon', value: 5000 }, 4700); // money that came in bought no card
+});
+
+test('gift cards: the app guesses the shop and the value from what was paid before', () => {
+  const wissel = (date, cents, shop, value) => tx({ date, cents, name: 'Wissel Nederland B.V.', gift: { shop, value } });
+  const data = withTxs(
+    wissel('2026-07-01', -3940, 'Albert Heijn', 4000), // 1,5% off
+    wissel('2026-07-02', -4750, 'Boekenbon', 5000), // 5% off then
+    wissel('2026-07-09', -4700, 'Boekenbon', 5000), // 6% off now
+    wissel('2026-07-10', -25, 'Speelgoedbon', 2500), // paid with points: its price says nothing
+  );
+  assert.deepEqual(bank.giftGuesses(data, 4433)[0], { shop: 'Albert Heijn', value: 4500 });
+  assert.deepEqual(bank.giftGuesses(data, 14100)[0], { shop: 'Boekenbon', value: 15000 });
+  assert.deepEqual(bank.giftGuesses(data, 950).find((guess) => guess.shop === 'Boekenbon'), { shop: 'Boekenbon', value: 1000 }); // 5% again: still a round value
+  assert.deepEqual(bank.giftGuesses(data, 6888).find((guess) => guess.shop === 'Boekenbon'), { shop: 'Boekenbon', value: 7330 }); // no round value near: to the nearest five cents
+  assert.deepEqual(bank.giftGuesses(data, 1234).map((guess) => guess.shop), ['Speelgoedbon', 'Boekenbon', 'Albert Heijn']); // no shop fits: the one bought last first
+  assert.deepEqual(bank.giftGuesses(bank.emptyBank(), 4433), []);
 });
 
 test('groceries split between people: the household keeps its part, the rest is for others', () => {
@@ -307,8 +359,11 @@ test('a starter file adds categories, rules, names and choices, or nothing at al
     cats: [{ id: 'sport', name: 'Sport', kind: 'out' }, { id: 'fun', name: 'Fun money', kind: 'out', budget: 40000 }],
     rules: { 'voorbeeld b v': 'salaris' }, fixed: { verzekeraar: true },
     names: { NL00TEST0123456789: 'Betaalrekening' }, choices: { 'NL00TEST0123456789.15': 'sport' },
+    gifts: { 'NL00TEST0123456789.17': { shop: 'Boekenbon', value: 5000 }, 'NL00TEST0123456789.11': { shop: 'Boekenbon', value: 5000 } },
   };
   assert.equal(bank.addStarter(data, starter), 0); // it brought no transactions
+  assert.deepEqual(data.txs.map((each) => each.gift?.value), [undefined, undefined, undefined, undefined, undefined, undefined, 5000, undefined]); // not on the salary
+  assert.equal(bank.addStarter(data, { kind: 'kassa-start', gifts: { 'NL00TEST0123456789.17': { shop: 'Boekenbon' } } }), null);
   assert.equal(data.cats.length, bank.START_CATS.length + 1);
   assert.equal(data.cats.find((cat) => cat.id === 'fun').budget, 40000);
   assert.deepEqual([data.since, data.accounts[0].name, data.txs[4].cat, data.rules['voorbeeld b v']], ['2026-06-01', 'Betaalrekening', 'sport', 'salaris']);

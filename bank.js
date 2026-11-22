@@ -7,21 +7,22 @@ import { isDate, isName, isoDate } from './logic.js';
 export const US = 'Wij'; // the household itself, in "Voor wie?"
 
 // The categories every phone starts with. Their ids are fixed, because the figures below count on some of them.
-// kind: 'out' = spending, 'in' = income, 'none' = money that only moves (own accounts, gift card balance).
+// kind: 'out' = spending, 'in' = income, 'none' = money that only moves (between own accounts).
 export const START_CATS = [
   { id: 'boodschappen', name: 'Boodschappen', kind: 'out' },
+  { id: 'uiteten', name: 'Uit eten', kind: 'out' },
   { id: 'fun', name: 'Fun money', kind: 'out' },
   { id: 'abonnementen', name: 'Abonnementen', kind: 'out' },
-  { id: 'auto', name: 'Auto', kind: 'out' },
+  { id: 'auto', name: 'Auto & vervoer', kind: 'out' },
   { id: 'verzekering', name: 'Verzekering & zorg', kind: 'out' },
   { id: 'winkelen', name: 'Winkelen', kind: 'out' },
+  { id: 'cadeaukaarten', name: 'Cadeaukaarten', kind: 'out' },
   { id: 'reizen', name: 'Reizen', kind: 'out' },
   { id: 'anderen', name: 'Voor anderen', kind: 'out' },
   { id: 'overig', name: 'Overig', kind: 'out' },
   { id: 'salaris', name: 'Salaris', kind: 'in' },
   { id: 'inkomen', name: 'Overig inkomen', kind: 'in' },
   { id: 'overboeking', name: 'Overboeking', kind: 'none' },
-  { id: 'cadeaukaarten', name: 'Cadeaukaarten', kind: 'none' },
 ];
 const KINDS = ['out', 'in', 'none'];
 
@@ -234,10 +235,13 @@ export function hasGap(bank, account) {
 // What a rule remembers of a counterparty's name: lower case, without numbers (a shop's branch) and marks.
 export const ruleKey = (name) => name.toLowerCase().replace(/[^a-zà-ÿ]+/g, ' ').trim();
 
-// Counterparties sorted without a rule of the user's: the supermarket chains, the subscriptions every household
-// knows (streaming, phone and internet), and the shop the gift cards come from.
+// Counterparties sorted without a rule of the user's: the supermarket chains, the chains to eat at, the
+// subscriptions every household knows (streaming, phone and internet), the train and the bus (a trip paid with
+// a bank card comes with a name of its own, "NLOV" and a code), and the shop the gift cards come from.
 const KNOWN = [
   [/^((bck|ccv|sumup|zettle) )?(albert heijn|ah|jumbo|lidl|aldi|plus|dirk vdbroek|dirk van den broek|hoogvliet|coop|spar|picnic|vomar|dekamarkt|nettorama|sligro)( |$)/, 'boodschappen'],
+  [/^((bck|ccv|sumup|zettle) )?(mcdonald s|mcdonalds|mc donalds|kfc|burger king|subway|domino s|dominos|new york pizza|thuisbezorgd|takeaway com|uber eats|starbucks|febo|sushipoint)( |$)/, 'uiteten'],
+  [/^(ns groep|ns reizigers|nlov[a-z]*|ov chipkaart)( |$)/, 'auto'],
   [/^(spotify|netflix|disney plus|hbo max|help hbomax|videoland|amazon prime|youtube premium|apple com bill|openai|odido|youfone|kpn|vodafone|ziggo|simyo|lebara)( |$)/, 'abonnementen'],
   [/^wissel (nederland|nl)( |$)/, 'cadeaukaarten'],
 ];
@@ -271,6 +275,12 @@ export function shiftMonth(month, by) {
 // counts under "Voor anderen".
 const forOthers = (shares) => (shares ?? []).reduce((sum, share) => sum + (share.who === US ? 0 : share.cents), 0);
 
+// The one shop whose gift cards the app holds itself. Buying one moves money onto a card, so it is not
+// spending: the money counts as groceries when the card pays at the till. Cards for other shops are spent
+// as far as the app can tell, and count on the day they are bought.
+export const AH = 'Albert Heijn';
+const onCard = (tx, cat) => cat === 'cadeaukaarten' && tx.gift?.shop === AH;
+
 // What a gift card payment adds to the figures: only the part the cards paid, because the pin part is on the
 // bank statement. A share for someone else comes out of the card part first.
 function cardParts(purchase) {
@@ -292,7 +302,7 @@ export function figures(bank, purchases, from, to) {
   for (const tx of bank.txs) {
     if (tx.date < start || tx.date >= to) continue;
     const cat = catOf(tx);
-    const kind = cat ? kinds.get(cat) : tx.cents < 0 ? 'out' : 'in';
+    const kind = !cat ? (tx.cents < 0 ? 'out' : 'in') : onCard(tx, cat) ? 'none' : kinds.get(cat);
     if (!cat) result.open++;
     if (kind === 'out') {
       const others = cat === 'boodschappen' ? forOthers(tx.shares) : 0;
@@ -359,6 +369,61 @@ export function byParty(txs) {
   return [...parties.values()].sort((a, b) => Math.abs(b.cents) - Math.abs(a.cents));
 }
 
+// ---------- gift cards ----------
+// A payment for gift cards can say what it bought: tx.gift = { shop, value }, the shop the cards are for and
+// what they are worth together. What they are worth above what was paid is what the cards saved.
+
+const byDate = (a, b) => a.date.localeCompare(b.date);
+
+// The gift cards bought from `from` up to `to`, never earlier than bank.since, per shop:
+// [{ shop, value, paid, count }], the largest value first.
+export function giftsBought(bank, from, to) {
+  const start = from > bank.since ? from : bank.since;
+  const shops = new Map();
+  for (const tx of bank.txs) {
+    if (!tx.gift || tx.date < start || tx.date >= to) continue;
+    const shop = shops.get(tx.gift.shop) ?? { shop: tx.gift.shop, value: 0, paid: 0, count: 0 };
+    shop.value += tx.gift.value;
+    shop.paid -= tx.cents;
+    shop.count++;
+    shops.set(tx.gift.shop, shop);
+  }
+  return [...shops.values()].sort((a, b) => b.value - a.value);
+}
+
+// The payments in the gift card category that do not say yet what they bought, the newest first.
+// A payment that came back (the same amount, on that day or later) bought nothing, so it is not in the list.
+export function giftsToFill(bank) {
+  const catOf = sorter(bank);
+  const blank = bank.txs.filter((tx) => !tx.gift && catOf(tx) === 'cadeaukaarten').sort(byDate);
+  const open = blank.filter((tx) => tx.cents < 0);
+  for (const back of blank.filter((tx) => tx.cents > 0)) {
+    const index = open.findLastIndex((tx) => tx.cents === -back.cents && tx.date <= back.date);
+    if (index >= 0) open.splice(index, 1);
+  }
+  return open.reverse();
+}
+
+// What a payment of `paid` cents probably bought: every shop cards were bought for before, each with the value
+// its last discount gives, the likeliest shop first. A value that lands on whole fives of euros speaks for a
+// shop, and the nearer the better; a discount that moved a little still lands there.
+export function giftGuesses(bank, paid) {
+  const rates = new Map(); // shop -> what a euro of card cost the last time, the shop bought last at the end
+  for (const tx of [...bank.txs].sort(byDate)) {
+    if (!tx.gift) continue;
+    const rate = -tx.cents / tx.gift.value;
+    const usual = rate > 0.5 && rate <= 1 ? rate : rates.get(tx.gift.shop) ?? 1; // a card paid with points says nothing about the price
+    rates.delete(tx.gift.shop);
+    rates.set(tx.gift.shop, usual);
+  }
+  return [...rates].reverse().map(([shop, rate]) => {
+    const exact = paid / rate;
+    const round = Math.round(exact / 500) * 500;
+    const near = round > 0 && Math.abs(exact - round) <= round * 0.015;
+    return { shop, value: near ? round : Math.round(exact / 5) * 5, off: near ? Math.abs(exact - round) : 1e9 };
+  }).sort((a, b) => a.off - b.off).map(({ shop, value }) => ({ shop, value }));
+}
+
 // ---------- fixed costs ----------
 // A fixed cost is a counterparty that is paid every month. bank.fixed holds the user's answer per rule key:
 // true = it is one, false = it was suggested and declined.
@@ -421,6 +486,7 @@ export const cardsOn = (cards, date) => cards.reduce((sum, card) =>
 
 const isId = (id) => typeof id === 'string' && /^[\w-]{1,64}$/.test(id);
 const isText = (text, max) => typeof text === 'string' && text.length <= max && !/[\u0000-\u001f]/.test(text);
+const isGift = (gift) => isName(gift?.shop) && Number.isInteger(gift.value) && gift.value > 0;
 const isTx = (tx) => typeof tx?.id === 'string' && /^[\w.-]{1,120}$/.test(tx.id) && isId(tx.acc) && isDate(tx.date)
   && Number.isInteger(tx.cents) && isText(tx.name, 60) && tx.name.length > 0 && isText(tx.text ?? '', 100)
   && (tx.iban === undefined || /^[A-Z0-9]{1,34}$/.test(tx.iban))
@@ -428,7 +494,8 @@ const isTx = (tx) => typeof tx?.id === 'string' && /^[\w.-]{1,120}$/.test(tx.id)
   // shares split money that went out, name by name, and add up to all of it
   && (tx.shares === undefined || (tx.cents < 0 && Array.isArray(tx.shares) && tx.shares.length > 0
     && tx.shares.every((share) => isName(share?.who) && Number.isInteger(share.cents) && share.cents > 0)
-    && tx.shares.reduce((sum, share) => sum + share.cents, 0) === -tx.cents));
+    && tx.shares.reduce((sum, share) => sum + share.cents, 0) === -tx.cents))
+  && (tx.gift === undefined || (tx.cents < 0 && isGift(tx.gift)));
 const isAccount = (account) => isId(account?.id) && isName(account.name) && isText(account.bank ?? '', 20)
   && (account.balance === undefined || Number.isInteger(account.balance))
   && (account.holder === undefined || isText(account.holder, 30)) && (account.card === undefined || account.card === true);
@@ -453,9 +520,10 @@ export function parseBank(data) {
       id, name, bank: bank ?? '', through, uploaded,
       ...(balance !== undefined && { balance }), ...(holder && { holder }), ...(card && { card }),
     })),
-    txs: data.txs.map(({ id, acc, date, cents, name, text, iban, own, cat, shares }) => ({
+    txs: data.txs.map(({ id, acc, date, cents, name, text, iban, own, cat, shares, gift }) => ({
       id, acc, date, cents, name, text: text ?? '', ...(iban && { iban }), ...(own && { own }), ...(cat && { cat }),
       ...(shares && { shares: shares.map(({ who, cents: part }) => ({ who, cents: part })) }),
+      ...(gift && { gift: { shop: gift.shop, value: gift.value } }),
     })),
     cats: data.cats.map(({ id, name, kind, budget }) => ({ id, name, kind, ...(budget && { budget }) })),
     rules: { ...data.rules }, fixed: { ...data.fixed }, since: data.since,
@@ -464,14 +532,16 @@ export function parseBank(data) {
 
 // A starter file: everything prepared outside the app, added to what is there. It may hold bank files that
 // were read already (`files`, each as a reader returns it, read at the moment `at`), and categories, rules,
-// choices and names: { files, at, cats, rules, fixed, since, names: account id -> name, choices: transaction id -> category id }
+// choices, names and gift cards: { files, at, cats, rules, fixed, since, names: account id -> name,
+// choices: transaction id -> category id, gifts: transaction id -> { shop, value } }
 // Returns how many transactions were new, or null, changing nothing, when the file is not that.
 export function addStarter(bank, starter, now) {
-  const { files = [], at = now, cats = [], rules = {}, fixed = {}, since = '', names = {}, choices = {} } = starter ?? {};
+  const { files = [], at = now, cats = [], rules = {}, fixed = {}, since = '', names = {}, choices = {}, gifts = {} } = starter ?? {};
   const ok = starter?.kind === 'kassa-start' && Array.isArray(cats) && cats.every(isCat)
     && isRules(rules, isId) && isRules(fixed, (value) => typeof value === 'boolean') && (since === '' || isDate(since))
     && typeof names === 'object' && Object.values(names).every(isName)
     && typeof choices === 'object' && Object.values(choices).every(isId)
+    && typeof gifts === 'object' && gifts !== null && Object.values(gifts).every(isGift)
     && Array.isArray(files) && files.every((file) => Array.isArray(file?.accounts) && file.accounts.every(isAccount)
       && Array.isArray(file.txs) && file.txs.every(isTx))
     && (files.length === 0 || (typeof at === 'string' && !Number.isNaN(Date.parse(at))));
@@ -486,6 +556,9 @@ export function addStarter(bank, starter, now) {
   Object.assign(bank.fixed, fixed);
   if (since) bank.since = since;
   for (const account of bank.accounts) if (names[account.id]) account.name = names[account.id];
-  for (const tx of bank.txs) if (choices[tx.id]) tx.cat = choices[tx.id];
+  for (const tx of bank.txs) {
+    if (choices[tx.id]) tx.cat = choices[tx.id];
+    if (gifts[tx.id] && tx.cents < 0) tx.gift = { shop: gifts[tx.id].shop, value: gifts[tx.id].value };
+  }
   return added;
 }

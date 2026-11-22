@@ -123,6 +123,25 @@
     </form>
   </dialog>
 
+  <dialog id="giftDialog" class="sheet" aria-labelledby="giftTitle">
+    <form method="dialog" novalidate>
+      <header class="sheet-bar">
+        <button type="button" class="text-button" data-action="close" data-en="Cancel">Annuleren</button>
+        <h2 id="giftTitle" data-en="Gift card">Cadeaukaart</h2>
+        <button class="text-button strong" value="ok" data-en="Save">Opslaan</button>
+      </header>
+      <p class="group-note" id="giftNote"></p>
+      <div class="group">
+        <label class="field"><span data-en="What the cards are worth">Waarde van de kaarten</span>
+          <input name="value" inputmode="decimal" autocomplete="off" placeholder="0,00" data-en="0.00">
+        </label>
+      </div>
+      <h3 class="section" data-en="For which shop">Voor welke winkel</h3>
+      <div class="group" id="giftShops"></div>
+      <p class="error" role="alert"></p>
+    </form>
+  </dialog>
+
   <dialog id="txDialog" class="sheet" aria-labelledby="txTitle">
     <form method="dialog" novalidate>
       <header class="sheet-bar">
@@ -134,6 +153,10 @@
       <div class="group" id="txWhoGroup">
         <button type="button" class="row" id="txWho"><span class="row-main" data-en="For whom?">Voor wie?</span>
           <span class="quiet" id="txWhoNow"></span><svg class="icon" aria-hidden="true"><use href="#i-next"/></svg></button>
+      </div>
+      <div class="group" id="txGiftGroup">
+        <button type="button" class="row" id="txGift"><span class="row-main" data-en="Gift card">Cadeaukaart</span>
+          <span class="quiet" id="txGiftNow"></span><svg class="icon" aria-hidden="true"><use href="#i-next"/></svg></button>
       </div>
       <div class="group">
         <label class="row" id="txAllRow"><span class="row-main" id="txAllLabel"></span>
