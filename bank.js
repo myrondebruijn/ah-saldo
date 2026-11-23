@@ -227,11 +227,16 @@ export function readLinked(list) {
   const accounts = [];
   const txs = [];
   for (const { iban, bank = 'Rabo', holder, txs: lines, balances } of list) {
-    const booked = balances.find((each) => each.balance_type === 'ITBD') ?? balances.find((each) => each.balance_type === 'CLBD');
-    const balance = booked && toCents(booked.balance_amount.amount);
+    const booked = lines.filter((each) => each.status === 'BOOK'); // pending lines may still change
+    // Openbank numbers a day's lines only when the day is over. Until then a line has no place among the others, so
+    // it waits for a later fetch, and comes off the balance, which counts it already.
+    const early = bank === 'Openbank' ? booked.filter((line) => !line.entry_reference) : [];
+    const done = booked.filter((line) => !early.includes(line));
+    const stated = balances.find((each) => each.balance_type === 'ITBD') ?? balances.find((each) => each.balance_type === 'CLBD');
+    const now = stated ? toCents(stated.balance_amount.amount) : null;
+    const balance = now === null ? null : now - early.reduce((sum, line) => sum + signed(line), 0);
     const owner = tidy(holder).slice(0, 30);
     accounts.push({ id: iban, name: `${bank} ${iban.slice(-4)}`, bank, ...(Number.isInteger(balance) && { balance }), ...(bank === 'Openbank' && owner && { holder: owner }) });
-    const done = lines.filter((each) => each.status === 'BOOK'); // booked; pending lines may still change
     if (bank === 'Openbank') {
       // A day's lines are numbered from the last one down (2026-11-18.3 came before 2026-11-18.2), and no line
       // says the balance after it: that is worked back from the balance now, as the statement's ids need it.

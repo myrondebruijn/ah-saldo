@@ -208,6 +208,17 @@ test('the Openbank link gives the lines of the statement the same ids, by workin
   assert.equal(data.txs.length, 7);
 });
 
+test('an Openbank line the bank has not numbered yet waits, and is taken off the balance that counts it', () => {
+  const pdf = bank.readOpenbank(statement(OPENBANK, { closing: '14.88' }));
+  const today = openbankLink([['2026-07-04', ['OVERBOEKING TEN GUNSTE VAN Bakker'], '-4.88', '10.00'], ...OPENBANK], '10.00');
+  today[0].txs[0].entry_reference = null; // as the bank sends a line of a day that is not over
+  const file = bank.readLinked(today);
+  assert.deepEqual(file.txs, pdf.txs); // the numbered lines keep the statement's ids
+  assert.equal(file.accounts[0].balance, 1488); // the balance after the last line that is there
+  today[0].txs[0].entry_reference = '2026-07-04.1'; // the day after
+  assert.equal(bank.readLinked(today).txs.length, pdf.txs.length + 1);
+});
+
 test('a balance on an earlier day follows from what was booked after it', () => {
   const data = loaded();
   const [account] = data.accounts;
