@@ -2214,6 +2214,15 @@ function closeDialog(dialog, value = '') {
   }, { once: true });
 }
 
+// Scrolls a sheet until `element` is in sight inside it, below the sheet's bar.
+function reveal(element) {
+  const sheet = element.closest('dialog');
+  const [box, frame] = [element, sheet].map((each) => each.getBoundingClientRect());
+  const top = frame.top + (sheet.querySelector('.sheet-bar')?.offsetHeight ?? 0);
+  if (box.bottom > frame.bottom - 12) sheet.scrollTop += box.bottom - frame.bottom + 12;
+  else if (box.top < top) sheet.scrollTop -= top - box.top;
+}
+
 // Shows a dialog; resolves with how it closed: 'ok' once its form is submitted and `check` returns no
 // error message, or '' when cancelled.
 function openDialog(dialog, check = () => '') {
@@ -2223,8 +2232,11 @@ function openDialog(dialog, check = () => '') {
     dialog.querySelector('form').onsubmit = (event) => {
       event.preventDefault(); // closeDialog does the closing, after the slide
       const message = check();
-      if (message) error.textContent = message;
-      else closeDialog(dialog, 'ok');
+      if (!message) closeDialog(dialog, 'ok');
+      else {
+        error.textContent = message;
+        reveal(error);
+      }
     };
     dialog.oncancel = (event) => {
       event.preventDefault();
@@ -2477,13 +2489,17 @@ async function askTrade({ trade, fund, found = [] }) {
     $('tradeDelete').textContent = field.sold.checked ? L('Deze verkoop verwijderen', 'Delete this sale') : L('Deze aankoop verwijderen', 'Delete this purchase');
   };
   field.sold.onchange();
-  $('tradeNote').textContent = fund ? `${fund.name} · ${fund.stock}`
-    : L('Kies de beurs waar je kocht; staat die er niet bij, neem dan de eerste. De waarde komt altijd in euro.', 'Choose the exchange you bought on; if it is not listed, take the first. The worth is always in euros.');
   $('tradeDeleteGroup').hidden = !trade;
-  $('tradeFound').hidden = Boolean(fund);
+  $('tradeFoundTitle').hidden = $('tradeFound').hidden = $('tradeFoundNote').hidden = Boolean(fund);
   $('tradeFound').innerHTML = found.map((each, index) => `
     <label class="row choice"><input type="radio" name="pick" value="${index}"${index ? '' : ' checked'}>
       <span class="row-main">${esc(each.name)} <small>${esc(each.where)} · ${esc(each.stock)}</small></span>${icon('check')}</label>`).join('');
+  // the fields are at the top, in reach above the keyboard; the note over them names the fund chosen in the list under them
+  $('tradeFound').onchange = () => {
+    const { name, stock } = fund ?? found[Number(field.pick.value)];
+    $('tradeNote').textContent = `${name} · ${stock}`;
+  };
+  $('tradeFound').onchange();
   let next;
   const answer = await openDialog($('tradeDialog'), () => {
     const { stock, name } = fund ?? found[Number(field.pick.value)];
@@ -3054,11 +3070,25 @@ addEventListener('hashchange', () => {
   tapped = false;
 });
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', render);
-// The iPhone keyboard can slide the visible area down past a sheet's fields (it scrolls to a field that
-// was still below the screen while the sheet rose); style.css moves the sheets along by this much.
-const pan = () => document.documentElement.style.setProperty('--pan', `${visualViewport.offsetTop}px`);
-visualViewport?.addEventListener('scroll', pan);
-visualViewport?.addEventListener('resize', pan);
+// The iPhone does not make the page smaller for its keyboard: it lays the keyboard over the page and slides the
+// visible part down to the field being typed in. A sheet that stayed as tall as the page, and followed that slide to
+// keep its bar on screen, held a field in its lower half behind the keyboard. So a sheet is as high as the visible
+// part (--view) and follows it (--pan; style.css uses both), and the field in use is scrolled into sight inside the
+// sheet. Zoomed in, the height of the visible part says nothing about a keyboard.
+function fit() {
+  const root = document.documentElement.style;
+  root.setProperty('--pan', `${visualViewport.offsetTop}px`);
+  if (visualViewport.scale === 1) root.setProperty('--view', `${visualViewport.height}px`);
+  else root.removeProperty('--view');
+  const field = document.activeElement;
+  if (field?.matches('dialog[open] :is(input, select)')) reveal(field.closest('label') ?? field);
+}
+if (window.visualViewport) {
+  visualViewport.addEventListener('scroll', fit);
+  visualViewport.addEventListener('resize', fit);
+  document.addEventListener('focusin', fit); // the next field, with the keyboard up already
+  fit();
+}
 
 // index.html is written in Dutch; data-en holds an element's English text, or an input's English placeholder
 document.documentElement.lang = lang;

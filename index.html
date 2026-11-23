@@ -238,7 +238,6 @@
         <button class="text-button strong" value="ok" data-en="Save">Opslaan</button>
       </header>
       <p class="group-note" id="tradeNote"></p>
-      <div class="group" id="tradeFound"></div>
       <div class="group">
         <label class="field"><span data-en="How many">Aantal</span>
           <input name="qty" inputmode="decimal" autocomplete="off" placeholder="0">
@@ -255,6 +254,9 @@
           <input type="checkbox" name="sold" class="switch" role="switch"></label>
       </div>
       <p class="error" role="alert"></p>
+      <h3 class="section" id="tradeFoundTitle" data-en="On which exchange">Aan welke beurs</h3>
+      <div class="group" id="tradeFound"></div>
+      <p class="group-note" id="tradeFoundNote" data-en="If yours is not listed, keep the first: the worth is always in euros.">Staat de jouwe er niet bij, laat dan de eerste staan: de waarde komt altijd in euro.</p>
       <div class="group" id="tradeDeleteGroup">
         <button type="button" class="row danger" id="tradeDelete" data-action="deleteTrade"></button>
       </div>
