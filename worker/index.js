@@ -62,7 +62,8 @@ async function bank(env, method, path, { body, ip } = {}) {
     headers: { Authorization: `Bearer ${jwt}`, ...(body && { 'Content-Type': 'application/json' }), ...(ip && { 'Psu-Ip-Address': ip }) },
     body: body && JSON.stringify(body),
   });
-  if (!response.ok) throw Object.assign(new Error(`bank ${response.status}`), { status: 502 });
+  // the bank's reason goes to the log (an error code and a sentence, no account data): "try later" and "link again" look the same otherwise
+  if (!response.ok) throw Object.assign(new Error(`bank ${response.status} ${(await response.text()).slice(0, 300)}`), { status: 502 });
   return response.json();
 }
 
@@ -316,7 +317,8 @@ async function handle(request, env, ctx) {
           got.push({ iban, bank: BANKS[link.bank], holder, txs, balances });
         }
         accounts.push(...got); // a bank's accounts come whole or not at all
-      } catch {
+      } catch (error) {
+        console.log(`${link.bank} fetch failed: ${error.message}`);
         failed.push(BANKS[link.bank]); // one bank not answering does not keep the other's lines away
       }
     }

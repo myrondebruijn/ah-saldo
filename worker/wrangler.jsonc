@@ -6,6 +6,8 @@
   // EB_APP: the Enable Banking app's id, not a secret; its private key is: npx wrangler secret put EB_KEY < the .pem
   "vars": { "ORIGIN": "https://myrondebruijn.github.io", "EB_APP": "817a5b2d-e124-4088-a43b-36c913fbc8d4" },
   // the Rabo check and the morning reminders (worker/index.js, check): 8, 12, 17 and 21 o'clock in Dutch winter time
+  // keeps what the server logs (why a bank said no) for a few days; not the requests themselves
+  "observability": { "enabled": true, "logs": { "invocation_logs": false } },
   "triggers": { "crons": ["0 7,11,16,20 * * *"] },
   "d1_databases": [{ "binding": "DB", "database_name": "kassa", "database_id": "7acc4928-6409-4ca4-9db6-e89f9c83e439" }]
 }
