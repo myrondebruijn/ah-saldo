@@ -5,7 +5,7 @@ import {
 } from './logic.js';
 import {
   AH, LARGE, START_CATS, US, addBalance, addFile, addStarter, balanceOn, byParty, cardsOn, catchUp, decodeText, dayRate, dueOn, emptyBank, ended, figures, fixedCosts,
-  fixedSuggestions, forWhom, giftGuesses, giftsBought, giftsToFill, hasGap, heldShops, inCategory, monthOf, parseBank, payFrom, plannedOpen, readCsv,
+  fixedSuggestions, forWhom, giftGuesses, giftsBought, giftsToFill, hasGap, heldShops, inCategory, monthOf, parseBank, payFrom, plannedOpen, readCsv, salaryBase,
   addLinked, readLinked, readOpenbank, ruleKey, shiftMonth, sorter,
 } from './bank.js';
 import {
@@ -453,13 +453,18 @@ async function startPush() {
 
 const MONTH_KEY = `${KEY}-month`; // what this phone told the server last
 
+// the bank accounts that keep last month from being closed
+function missingFiles() {
+  const month = shiftMonth(thisMonth(), -1);
+  const next = `${thisMonth()}-01`;
+  return bank.accounts.filter((account) => !account.shop && account.through < next && isoDate(new Date(account.uploaded)) < next
+    && !(account.balance === 0 && !bank.txs.some((tx) => tx.acc === account.id && monthOf(tx.date) === month)));
+}
+
 function reportMonth() {
   if (!sharing || !bank.accounts.length) return;
   const month = shiftMonth(thisMonth(), -1);
-  const next = `${thisMonth()}-01`;
-  const missing = bank.accounts.filter((account) => !account.shop && account.through < next && isoDate(new Date(account.uploaded)) < next
-    && !(account.balance === 0 && !bank.txs.some((tx) => tx.acc === account.id && monthOf(tx.date) === month)))
-    .map((account) => account.name.slice(0, 40));
+  const missing = missingFiles().map((account) => account.name.slice(0, 40));
   const told = JSON.stringify({ month, missing });
   if (localStorage.getItem(MONTH_KEY) === told) return;
   const { spending, income, open } = monthFigures(month);
@@ -489,6 +494,8 @@ const monthRange = (month) => [`${month}-01`, `${shiftMonth(month, 1)}-01`];
 const monthDate = (month) => new Date(Number(month.slice(0, 4)), Number(month.slice(5)) - 1, 1);
 const monthName = (month) => monthDate(month).toLocaleDateString(LOCALE, { month: 'long', year: 'numeric' });
 const monthShort = (month) => monthDate(month).toLocaleDateString(LOCALE, { month: 'short' }).replace('.', '');
+const monthLong = (month) => monthDate(month).toLocaleDateString(LOCALE, { month: 'long' });
+const dayBefore = (date) => new Date(Date.parse(date) - 864e5).toISOString().slice(0, 10);
 const dayShort = (day) => new Date(day).toLocaleDateString(LOCALE, { day: 'numeric', month: 'short', timeZone: 'UTC' }).replace('.', '');
 const average = (list) => (list.length ? Math.round(list.reduce((sum, each) => sum + each, 0) / list.length) : 0);
 
@@ -712,6 +719,10 @@ function txRow(tx, catOf, { category = true, account = true, toFill } = {}) {
     </button></li>`;
 }
 
+// what is left of a pot's amount, or how far it is over, in red then
+const potLeft = (left) => `<span${left < 0 ? ' class="over-text"' : ''}>${left < 0
+  ? L(`${formatEuro(-left)} erover`, `${formatEuro(-left)} over`) : L(`nog ${formatEuro(left)}`, `${formatEuro(left)} left`)}</span>`;
+
 // A pot: a category with an amount per month, what was spent of it, and for the running month where today is.
 function potRow(cat, spent, month) {
   const running = month === thisMonth();
@@ -721,9 +732,20 @@ function potRow(cat, spent, month) {
   return `
     <li><a class="row meter-row" href="#/categorie/${cat.id}">
       <span class="row-main">${esc(shown(cat.name))} <small class="under">${formatEuro(spent)} ${L('van', 'of')} ${formatEuro(cat.budget)}</small></span>
-      <span class="${left < 0 ? 'over-text' : ''}">${left < 0 ? L(`${formatEuro(-left)} erover`, `${formatEuro(-left)} over`) : L(`nog ${formatEuro(left)}`, `${formatEuro(left)} left`)}</span>
+      ${potLeft(left)}
       ${meterBar(spent / cat.budget, { over: left < 0, pace: running ? day / days : null })}
     </a></li>`;
+}
+
+// A pot on Overview, this month: name and what is left above the bar, what was spent of its amount below it
+function potLine(cat, spent) {
+  const left = cat.budget - spent;
+  return `
+    <a class="pot-line" href="#/categorie/${cat.id}">
+      <span class="pot-head"><span>${esc(shown(cat.name))}</span>${potLeft(left)}</span>
+      ${meterBar(spent / cat.budget, { over: left < 0, pace: new Date().getDate() / daysIn(thisMonth()) })}
+      <small>${formatEuro(spent)} ${L('van', 'of')} ${formatEuro(cat.budget)}</small>
+    </a>`;
 }
 
 // ---------- gift cards bought ----------
@@ -841,6 +863,34 @@ function fixedSummary(month) {
 // the newest payment to a counterparty, by its rule key
 const lastPaid = (key) => bank.txs.filter((tx) => ruleKey(tx.name) === key).sort((a, b) => b.date.localeCompare(a.date))[0];
 
+// What is still to come in `month` while it runs (`open`), and what it will probably have cost at its end. `due`: the
+// fixed costs not paid yet, each on the day of the month it was paid the last time, and the payments the user
+// planned; a plan for a later month is listed, but only this month's (`coming`) count. `sure` is what was `spent`
+// plus what is still to come; `ahead` adds `rate` cents of everyday spending for every day that is left.
+function outlook(month, spent, open) {
+  const fixed = fixedSummary(month);
+  const catOf = sorter(bank);
+  const days = daysIn(month);
+  const due = !open ? [] : [
+    ...fixed.costs.filter((cost) => !cost.paid && cost.expected).map((cost) => ({ cost, tx: lastPaid(cost.key) })).map(({ cost, tx }) => ({
+      date: `${month}-${String(Math.min(Number(tx.date.slice(8)), days)).padStart(2, '0')}`, name: cost.name, note: catName(catOf(tx)), cents: cost.expected })),
+    ...plannedOpen(bank, isoDate()).map((plan) => ({ ...plan, note: L('Gepland', 'Planned') })),
+  ].sort((a, b) => a.date.localeCompare(b.date));
+  const coming = due.filter((each) => monthOf(each.date) === month);
+  const waiting = coming.reduce((sum, each) => sum + each.cents, 0);
+  const rate = open ? dayRate(bank, state.purchases, isoDate()) : 0;
+  const sure = spent + waiting;
+  return { fixed, due, coming, waiting, rate, sure, ahead: sure + Math.round(rate * (days - Number(isoDate().slice(8)))) };
+}
+
+// a payment still to come, on a small calendar page; a tap on a planned one takes it off again
+function dueRow(each) {
+  const row = `<span class="date-badge"><b>${Number(each.date.slice(8))}</b>${monthShort(monthOf(each.date))}</span>
+    <span class="row-main">${esc(each.name)} <small>${each.note}</small></span>
+    <span class="amount quiet">${formatEuro(each.cents)}</span>`;
+  return each.id ? `<li><button class="row" data-action="unplan" data-id="${esc(each.id)}">${row}</button></li>` : `<li class="row">${row}</li>`;
+}
+
 function accountRows(date) {
   return bank.accounts.map((account) => (account.shop ? `
     <li><a class="row" href="#/saldo/${account.id}">
@@ -856,13 +906,89 @@ const worthOn = (date) => bank.accounts.reduce((sum, account) => sum + balanceOn
 
 const uploadRow = () => `<button class="row tint" data-action="upload">${icon('upload')}<span class="row-main">${L('Bankbestanden uploaden', 'Upload bank files')}</span></button>`;
 
+// One thing to do on Overview: a small tile with its sign, what to do and, below it, why. The tile is blue for work
+// in the app, orange for something that is missing, ending or at risk. `attrs` makes it a link or a button.
+function todo(attrs, glyph, warn, text, why = '') {
+  const tag = attrs.startsWith('href') ? 'a' : 'button';
+  return `
+    <li><${tag} class="row" ${attrs}><span class="todo-icon${warn ? ' warn' : ''}">${icon(glyph)}</span>
+      <span class="row-main">${text}${why && ` <small>${why}</small>`}</span>${icon('next')}</${tag}></li>`;
+}
+
+// a line through a run of amounts, to show which way they went; the amount itself is written beside it
+function spark(values) {
+  if (values.length < 2) return '';
+  const low = Math.min(...values);
+  const high = Math.max(...values);
+  const points = values.map((cents, index) => [4 + index * 292 / (values.length - 1), high > low ? 40 - (cents - low) / (high - low) * 34 : 23]);
+  const [x, y] = points.at(-1);
+  return `<svg class="spark" viewBox="0 0 300 44" aria-hidden="true">
+    <polyline points="${points.map((point) => point.map((each) => each.toFixed(1)).join(',')).join(' ')}"/><circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4"/></svg>`;
+}
+
+// The top of Overview: what will probably be left of the salary when the month is over. The salary is the average of
+// the three months before (salaryBase), so it moves on every month. Under the bar the salaries themselves, with the
+// months the average takes marked. `now` is this month's figures. Without a salary to go by it is what was spent and
+// what came in.
+function salaryCard(month, now, { waiting, sure, ahead }) {
+  const { past, counted, usual } = salaryBase(bank, state.purchases, month);
+  if (!usual) {
+    return `
+      <a class="summary" href="#/inzicht">
+        <p class="footnote">${L('Uitgegeven in', 'Spent in')} ${monthName(month)}</p>
+        <p class="total">${formatEuro(now.spending)}</p>
+        <p class="footnote">${L('Binnengekomen', 'Came in')} ${formatEuro(now.income)} · ${now.income >= now.spending
+          ? `<span class="amount">${L('over', 'left')} ${formatEuro(now.income - now.spending)}</span>`
+          : `<span class="amount">${L('tekort', 'short')} ${formatEuro(now.spending - now.income)}</span>`}</p>
+      </a>`;
+  }
+  const left = usual - ahead;
+  const rest = daysIn(month) - Number(isoDate().slice(8));
+  const share = (cents) => `${Math.round(cents / usual * 100)}%`;
+  const end = (cents) => Math.min(Math.max(cents, 0) / usual, 1) * 100; // where on the bar an amount reaches
+  const parts = [['out', 0, end(now.spending)], ['sure', end(now.spending), end(sure)], ['ahead', end(sure), end(ahead)]].filter(([, from, to]) => to > from);
+  const cells = [...past, { month, ...now }].map((each) => {
+    const cents = each.byCat.get('salaris') ?? 0;
+    const kind = each.month === month ? ' class="this"' : counted.includes(each) ? ' class="in-average"' : '';
+    return `<li${kind}><span>${monthShort(each.month)}</span><b>${cents ? Math.round(cents / 100).toLocaleString(LOCALE) : '—'}</b></li>`;
+  }).join('');
+  const span = counted.length > 1 ? L(`${monthLong(counted[0].month)} t/m ${monthLong(counted.at(-1).month)}`,
+    `${monthLong(counted[0].month)} to ${monthLong(counted.at(-1).month)}`) : monthLong(counted[0].month);
+  return `
+    <a class="summary" href="#/inzicht">
+      <div class="summary-top">
+        <p class="footnote">${left < 0 ? L(`Verwacht tekort eind ${monthLong(month)}`, `Expected short at the end of ${monthLong(month)}`)
+          : L(`Verwacht over eind ${monthLong(month)}`, `Expected left at the end of ${monthLong(month)}`)}</p>
+        <p class="footnote">${!rest ? L('laatste dag', 'last day') : rest === 1 ? L('nog 1 dag', '1 day left') : L(`nog ${rest} dagen`, `${rest} days left`)}</p>
+      </div>
+      <p class="total${left < 0 ? ' over-text' : ''}">${wholeEuro(Math.abs(left))}</p>
+      <p class="footnote">${L(`van je gemiddelde salaris van ${wholeEuro(usual)}`, `of your average salary of ${wholeEuro(usual)}`)}</p>
+      <p class="use-head"><strong>${L('Salaris gebruikt', 'Salary used')}</strong>
+        <span>${ahead === now.spending ? share(now.spending) : L(`${share(now.spending)} nu, ${share(ahead)} verwacht`, `${share(now.spending)} now, ${share(ahead)} expected`)}</span></p>
+      <svg class="use" aria-hidden="true"><rect class="track" width="100%" height="100%" rx="4"/>${parts.map(([name, from, to]) =>
+        `<rect class="${name}" x="${from.toFixed(1)}%" width="${(to - from).toFixed(1)}%" height="100%" rx="${name === 'out' ? 4 : 3}"/>`).join('')}</svg>
+      <p class="legend use-legend"><span><i class="key k-out"></i>${L('Uit', 'Out')} ${wholeEuro(now.spending)}</span>${
+        waiting ? `<span><i class="key k-sure"></i>${L('Komt nog', 'Still to come')} ${wholeEuro(waiting)}</span>` : ''}${
+        ahead > sure ? `<span><i class="key k-ahead"></i>${L('Rest verwacht', 'Rest expected')} ${wholeEuro(ahead - sure)}</span>` : ''}${
+        left > 0 ? `<span><i class="key k-free"></i>${L('Over', 'Left')} ${wholeEuro(left)}</span>` : ''}</p>
+      <div class="salary">
+        <h3>${L('Salaris per maand', 'Salary per month')}</h3>
+        <ol class="months">${cells}</ol>
+        <div class="average-mark">${'<span></span>'.repeat(past.length - counted.length)}<p class="span-${counted.length}">${L('gemiddeld', 'average')} ${wholeEuro(usual)}</p><span></span></div>
+        <p class="footnote">${L(`Het gemiddelde is van ${span}; ${monthLong(month)} telt mee vanaf ${monthLong(shiftMonth(month, 1))}.`,
+          `The average covers ${span}; ${monthLong(month)} counts from ${monthLong(shiftMonth(month, 1))}.`)}</p>
+      </div>
+    </a>`;
+}
+
 function overviewScreen() {
   const month = thisMonth();
   const now = monthFigures(month);
   const today = isoDate();
   // an account with nothing on it (the savings account kept at 0) needs no new files
   const oldest = Math.max(0, ...bank.accounts.filter((account) => !account.shop && account.balance !== 0).map((account) => daysLeft(today, isoDate(new Date(account.uploaded)))));
-  const fixed = fixedSummary(month);
+  const coming = outlook(month, now.spending, Number(today.slice(8)) < daysIn(month));
+  const { fixed, due, waiting } = coming;
   const suggested = fixedSuggestions(bank, month).length;
   const open = openCount();
   const gaps = bank.accounts.filter((account) => hasGap(bank, account));
@@ -884,51 +1010,69 @@ function overviewScreen() {
         <div class="group">${cards}</div>`,
     };
   }
+  // what to do: work in the app first, then what is missing, ending or at risk
+  const names = (accounts) => accounts.map((account) => esc(account.name)).join(', ');
+  const lastMonth = shiftMonth(month, -1);
+  const missing = missingFiles();
+  const ending = sharing ? Object.entries(links.banks).filter(([, until]) => daysLeft(until.slice(0, 10), today) <= 14) : [];
+  const expiring = state.cards.filter((card) => balance(card) > 0 && ['soon', 'expired'].includes(expiryState(card.expiry, today)));
+  const toFill = giftsToFill(bank).length;
+  const todos = [
+    open && todo('href="#/categorie/open"', 'list', false, L(`${plural(open, 'transactie', 'transacties')} indelen`, `Sort ${plural(open, 'transaction', 'transactions')}`)),
+    toFill && todo('data-action="fillGifts"', 'card', false, L(`${plural(toFill, 'cadeaukaart', 'cadeaukaarten')} invullen`,
+      `Fill in ${plural(toFill, 'gift card', 'gift cards')}`), L('Winkel en waarde', 'Shop and value')),
+    missing.length ? todo('data-action="upload"', 'upload', true, L(`Bestand van ${monthLong(lastMonth)} uploaden`, `Upload the file for ${monthLong(lastMonth)}`),
+      L(`Nog niet compleet: ${names(missing)}`, `Not complete yet: ${names(missing)}`))
+      : oldest > STALE && todo('data-action="upload"', 'upload', true, L('Nieuwe bankbestanden uploaden', 'Upload new bank files'),
+        L(`De laatste upload is ${oldest} dagen oud`, `The last upload is ${oldest} days old`)),
+    gaps.length && todo('data-action="upload"', 'warn', true, L(`Er ontbreken transacties bij ${names(gaps)}`, `Transactions are missing for ${names(gaps)}`),
+      L('Upload ook de periode ertussen', 'Upload the period in between as well')),
+    ...ending.map(([name, until]) => todo('href="#/meer"', 'warn', true, daysLeft(until.slice(0, 10), today) < 0
+      ? L(`${name}-koppeling is verlopen`, `${name} link has ended`)
+      : L(`${name}-koppeling loopt af op ${dayShort(until.slice(0, 10)).replace(' ', '&nbsp;')}`, `${name} link ends on ${dayShort(until.slice(0, 10)).replace(' ', '&nbsp;')}`),
+    L('Koppel opnieuw in Instellingen', 'Link again in Settings'))),
+    ...expiring.map((card) => todo(`href="#/kaart/${card.id}"`, 'warn', true, L(`AH-kaart ${last4(card)}`, `AH card ${last4(card)}`),
+      `${expiryLabel(card)} · ${formatEuro(balance(card))} ${L('op de kaart', 'on the card')}`)),
+    state.needsBackup && !sharing && todo('data-action="export"', 'warn', true, L('Back-up maken', 'Make a backup'),
+      L('Er zijn nieuwe gegevens zonder back&#8209;up', 'There is new data without a backup')),
+  ].filter(Boolean);
+  // when the bank links last brought news; with sharing off there are none
+  const linked = sharing ? Object.keys(links.banks) : [];
+  const clock = links.ok && (isoDate(new Date(links.ok)) === today
+    ? L(`om ${new Date(links.ok).toLocaleTimeString(LOCALE, { hour: '2-digit', minute: '2-digit' })}`, `at ${new Date(links.ok).toLocaleTimeString(LOCALE, { hour: '2-digit', minute: '2-digit' })}`)
+    : L(`op ${dayShort(isoDate(new Date(links.ok)))}`, `on ${dayShort(isoDate(new Date(links.ok)))}`));
+  const fetched = !linked.length || !links.ok ? '' : links.failed.length
+    ? `<p class="fetched failed">${L(`Ophalen bij ${links.failed.join(' en ')} lukte niet`, `Fetching from ${links.failed.join(' and ')} failed`)}</p>`
+    : `<p class="fetched">${L(`${linked.join(' en ')} bijgewerkt ${clock}`, `${linked.join(' and ')} updated ${clock}`)}</p>`;
+  // net worth at the end of each of the last twelve months that are counted; this month stands at today
+  const first = bank.since ? monthOf(bank.since) : '';
+  const worths = Array.from({ length: 12 }, (unused, index) => shiftMonth(month, index - 11)).filter((each) => each >= first)
+    .map((each) => worthOn(each === month ? '9999' : `${each}-31`));
+  const grown = worthOn('9999') - worthOn(dayBefore(`${month}-01` > bank.since ? `${month}-01` : bank.since));
   return {
     html: `${title}
-      <a class="summary" href="#/inzicht">
-        <p class="footnote">${L('Uitgegeven in', 'Spent in')} ${monthName(month)}</p>
-        <p class="total">${formatEuro(now.spending)}</p>
-        <p class="footnote">${L('Binnengekomen', 'Came in')} ${formatEuro(now.income)} · ${now.income >= now.spending
-          ? `<span class="amount">${L('over', 'left')} ${formatEuro(now.income - now.spending)}</span>`
-          : `<span class="amount">${L('tekort', 'short')} ${formatEuro(now.spending - now.income)}</span>`}</p>
-      </a>
-      ${oldest > STALE ? `
-        <div class="group">
-          <p class="row notice">${icon('warn')}<span class="row-main">${L(`De laatste upload is ${oldest} dagen oud. Tijd voor nieuwe bestanden.`,
-            `The last upload is ${oldest} days old. Time for new files.`)}</span></p>
-          ${uploadRow()}
-        </div>` : ''}
-      ${sharing ? Object.entries(links.banks).filter(([, until]) => daysLeft(until.slice(0, 10), today) <= 14).map(([name, until]) => `
-        <div class="group"><a class="row notice" href="#/meer">${icon('warn')}<span class="row-main">${daysLeft(until.slice(0, 10), today) < 0
-          ? L(`De ${name}-koppeling is verlopen. Koppel opnieuw in Instellingen.`, `The ${name} link has ended. Link again in Settings.`)
-          : L(`De ${name}-koppeling loopt af op ${dayShort(until.slice(0, 10))}. Koppel opnieuw in Instellingen.`,
-            `The ${name} link ends on ${dayShort(until.slice(0, 10))}. Link again in Settings.`)}</span>${icon('next')}</a></div>`).join('') : ''}
-      ${gaps.length ? `
-        <div class="group"><p class="row notice">${icon('warn')}<span class="row-main">${L('Er ontbreken transacties bij', 'Transactions are missing for')}
-          ${gaps.map((account) => esc(account.name)).join(', ')}. ${L('Upload ook de periode ertussen.', 'Upload the period in between as well.')}</span></p></div>` : ''}
+      ${fetched}
+      ${salaryCard(month, now, coming)}
+      ${todos.length ? `
+        <h2 class="section split-head"><span>${L('Te doen', 'To do')}</span><span>${todos.length}</span></h2>
+        <ul class="group todos">${todos.join('')}</ul>` : ''}
       ${pushNotice()}
-      ${backupNotice()}
-      <h2 class="section">${L('Potjes', 'Pots')}</h2>
-      <ul class="group">
-        ${pots().map((cat) => potRow(cat, now.byCat.get(cat.id) ?? 0, month)).join('')
-          || `<li><a class="row tint" href="#/potjes">${L('Kies een bedrag per maand voor een potje', 'Choose an amount per month for a pot')}</a></li>`}
-      </ul>
-      <div class="group">
-        ${open ? `<a class="row" href="#/categorie/open"><span class="row-main">${L('Nog indelen', 'To sort')}</span>
-          <span class="amount">${L(plural(open, 'transactie', 'transacties'), plural(open, 'transaction', 'transactions'))}</span>${icon('next')}</a>` : ''}
-        ${fillRow()}
-        <a class="row" href="#/vast"><span class="row-main">${L('Vaste lasten', 'Fixed costs')}
+      <h2 class="section split-head"><span>${L('Potjes', 'Pots')}</span>${pots().length ? `<span><i class="key today"></i>${L('vandaag', 'today')}</span>` : ''}</h2>
+      ${pots().length ? `<div class="summary pots">${pots().map((cat) => potLine(cat, now.byCat.get(cat.id) ?? 0)).join('')}</div>`
+        : `<div class="group"><a class="row tint" href="#/potjes">${L('Kies een bedrag per maand voor een potje', 'Choose an amount per month for a pot')}</a></div>`}
+      <h2 class="section split-head"><span>${L('Wat nog komt', 'Still to come')}</span><span>${waiting ? formatEuro(waiting) : ''}</span></h2>
+      <ul class="group dated">
+        ${due.map(dueRow).join('')}
+        <li><a class="row" href="#/vast"><span class="row-main">${fixed.costs.length ? L('Alle vaste lasten', 'All fixed costs') : L('Vaste lasten', 'Fixed costs')}
           <small>${fixed.costs.length ? fixed.text : suggested ? L(plural(suggested, 'voorstel', 'voorstellen'), plural(suggested, 'suggestion', 'suggestions')) : L('Nog geen', 'None yet')}</small></span>
-          <span class="amount">${fixed.costs.length ? formatEuro(fixed.total) : ''}</span>${icon('next')}</a>
-      </div>
-      <h2 class="section">${L('Rekeningen', 'Accounts')}</h2>
-      <ul class="group">
-        ${accountRows()}
-        <li>${cards}</li>
-        <li class="row"><strong class="row-main">${L('Samen', 'Together')}</strong><strong class="amount">${formatEuro(worthOn('9999'))}</strong></li>
+          <span class="amount">${fixed.costs.length ? formatEuro(fixed.total) : ''}</span>${icon('next')}</a></li>
       </ul>
-      <div class="group">${uploadRow()}</div>`,
+      <h2 class="section split-head"><span>${L('Vermogen', 'Net worth')}</span><span>${worths.length > 1 ? L(`${worths.length} maanden`, `${worths.length} months`) : ''}</span></h2>
+      <a class="summary worth-card" href="#/inzicht/vermogen">
+        <p class="tile-total">${formatEuro(worthOn('9999'))}</p>
+        <p class="footnote${grown >= 0 ? ' plus' : ''}">${signed(grown)} ${L('deze maand', 'this month')}</p>
+        ${spark(worths)}
+      </a>`,
   };
 }
 
@@ -1193,30 +1337,15 @@ function insightScreen() {
     versus = `<p class="center versus">${change(diff, Math.round(diff / 100) === 0 ? L(`Evenveel als ${nl}`, `The same as ${en}`)
       : L(`${wholeEuro(Math.abs(diff))} ${diff > 0 ? 'meer' : 'minder'} dan ${nl}`, `${wholeEuro(Math.abs(diff))} ${diff > 0 ? 'more' : 'less'} than ${en}`))}</p>`;
   }
-  const fixed = fixedSummary(view.month);
+  const { fixed, due, coming, waiting, sure, rate, ahead } = outlook(view.month, now.spending, open);
   const fixedRow = !yearly && fixed.costs.length ? `
     <a class="row" href="#/vast"><span class="row-main">${L('Vaste lasten', 'Fixed costs')} <small>${fixed.text}</small></span>
       <span class="amount">${formatEuro(fixed.total)}</span>${icon('next')}</a>` : '';
-  const catOf = sorter(bank);
-  // What is still to come: the fixed costs of this month, each on the day of the month it was paid the last time,
-  // and the payments the user planned. A plan for a later month is listed, but only this month's count.
-  const due = !open ? [] : [
-    ...fixed.costs.filter((cost) => !cost.paid && cost.expected).map((cost) => ({ cost, tx: lastPaid(cost.key) })).map(({ cost, tx }) => ({
-      date: `${view.month}-${String(Math.min(Number(tx.date.slice(8)), days)).padStart(2, '0')}`, name: cost.name, note: catName(catOf(tx)), cents: cost.expected })),
-    ...plannedOpen(bank, isoDate()).map((plan) => ({ ...plan, note: L('Gepland', 'Planned') })),
-  ].sort((a, b) => a.date.localeCompare(b.date));
-  const coming = due.filter((each) => monthOf(each.date) === view.month);
-  const waiting = coming.reduce((sum, each) => sum + each.cents, 0);
   const daysLeft = days - day;
-  // what the month has cost at its end for sure, and what every day still to come probably adds to that
-  const sure = now.spending + waiting;
-  const rate = open ? dayRate(bank, state.purchases, isoDate()) : 0;
-  const ahead = sure + Math.round(rate * daysLeft);
   const room = average3 - sure; // what may still go out and stay under the average
   // From what was left to what the net worth did. Money that only moved is not spending, but a loan repaid or
   // money sent to an account the app does not hold did leave the accounts; the rest is the gift cards (a card
   // is worth more than it cost, and balance can be added or corrected by hand).
-  const dayBefore = (date) => new Date(Date.parse(date) - 864e5).toISOString().slice(0, 10);
   const worthWas = worthOn(dayBefore(from > bank.since ? from : bank.since));
   const worthIs = worthOn(dayBefore(to));
   const moves = bank.cats.filter((cat) => cat.kind === 'none').map((cat) => [cat, now.moved.get(cat.id) ?? 0]).filter(([, cents]) => cents);
@@ -1287,12 +1416,7 @@ function insightScreen() {
           average3 ? ` ${L('Je gemiddelde is wat er de drie maanden ervoor gemiddeld uitging.', 'Your average is what went out on average in the three months before.')}` : ''}${
           over.size ? ` ${L('Een vaste last die is gestopt telt in de maanden ervoor niet mee.', 'A fixed cost that has stopped is left out of the months before.')}` : ''}</p>
         <h2 class="section split-head"><span>${L('Wat nog komt', 'Still to come')}</span><span>${formatEuro(waiting)}</span></h2>
-        <ul class="group">${due.map((each) => {
-          const row = `<span class="date-badge"><b>${Number(each.date.slice(8))}</b>${monthShort(monthOf(each.date))}</span>
-            <span class="row-main">${esc(each.name)} <small>${each.note}</small></span>
-            <span class="amount quiet">${formatEuro(each.cents)}</span>`;
-          return each.id ? `<li><button class="row" data-action="unplan" data-id="${esc(each.id)}">${row}</button></li>` : `<li class="row">${row}</li>`;
-        }).join('')}
+        <ul class="group">${due.map(dueRow).join('')}
           <li><button class="row tint" data-action="plan">${L('Betaling plannen', 'Plan a payment')}</button></li>
           ${fixedRow && `<li>${fixedRow}</li>`}
         </ul>` : ''}
@@ -1312,7 +1436,7 @@ function insightScreen() {
         <h2 class="section">${L('Inkomen', 'Income')}</h2>
         <ul class="group">${earned.map(([id, cents]) => `
           <li><a class="row" href="#/categorie/${id}"><span class="row-main">${catName(id)}</span><span class="amount">${formatEuro(cents)}</span>${icon('next')}</a></li>`).join('')}</ul>` : ''}
-      ${points.length || moves.length || cardGain ? `<h2 class="section">${L('Vermogen', 'Net worth')}</h2>` : ''}
+      ${points.length || moves.length || cardGain ? `<h2 class="section" id="vermogen">${L('Vermogen', 'Net worth')}</h2>` : ''}
       ${points.length ? `
         <section class="summary worth">
           <p class="footnote">${worthMonth === thisMonth() ? L('Nu', 'Now') : `${L('Eind', 'End of')} ${monthName(worthMonth)}`}</p>
@@ -1842,6 +1966,7 @@ function render() {
 function show() {
   render();
   scrollTo(0, 0);
+  if (route() === 'inzicht' && routeId()) $(routeId())?.scrollIntoView(); // Overview's net worth opens Insight at its net worth
   app.focus({ preventScroll: true });
 }
 

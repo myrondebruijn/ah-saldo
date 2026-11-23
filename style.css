@@ -412,7 +412,7 @@ a.summary { display: block; }
 .key.rest { background: var(--meter-track); box-shadow: inset 0 0 0 1px var(--tint); }
 /* the running month added up per day: solid so far, thin on to what is sure, dotted on to the forecast, the month before dashed */
 .chart-title { font-size: .9375rem; font-weight: 600; }
-.pace { display: block; width: 100%; height: auto; margin-top: .625rem; overflow: visible; }
+svg.pace { display: block; width: 100%; height: auto; margin-top: .625rem; overflow: visible; } /* the chart; a pot's bar has a rect.pace too */
 .pace text { fill: var(--label2); font-size: 11px; }
 .pace .grid { stroke: var(--fill); }
 .pace .base, .pace .rule { stroke: var(--line); }
@@ -438,6 +438,72 @@ a.summary { display: block; }
 /* the day a fixed cost is expected, as a small calendar page */
 .date-badge { flex: none; display: grid; place-content: center; width: 2.75rem; height: 2.875rem; margin: -.375rem 0; border-radius: .625rem; background: var(--bg); color: var(--label2); font-size: .6875rem; font-weight: 600; line-height: 1.1; text-align: center; text-transform: uppercase; }
 .date-badge b { color: var(--label); font-size: 1.0625rem; font-weight: 700; }
+
+/* ---------- overview ---------- */
+/* when the bank links last brought news, under the title: a green dot, orange when a fetch failed */
+.fetched { display: flex; align-items: center; gap: .375rem; padding: 0 .25rem; color: var(--label2); font-size: .8125rem; line-height: 1.35; }
+.fetched::before { content: ""; flex: none; width: .5rem; height: .5rem; border-radius: 50%; background: var(--plus); }
+.fetched.failed::before { background: var(--soon); }
+/* the salary card: what is left at the end of the month, the salary as one bar, the salaries month by month */
+.summary-top, .use-head { display: flex; justify-content: space-between; align-items: baseline; gap: .75rem; }
+.summary-top > :last-child, .use-head > :last-child { flex: none; white-space: nowrap; }
+.use-head { margin-top: .875rem; color: var(--label2); font-size: .8125rem; line-height: 1.35; }
+.use-head strong { color: var(--label); font-weight: 600; }
+.use { display: block; width: 100%; height: .75rem; margin: .375rem 0 .625rem; overflow: visible; }
+.use .track { fill: var(--fill); }
+.use .out { fill: var(--tint); }
+.use .sure { fill: var(--meter-track); stroke: var(--tint); stroke-width: 1.5; }
+.use .ahead { fill: none; stroke: var(--tint); stroke-width: 1.5; stroke-dasharray: 3 2; }
+.use-legend { justify-content: flex-start; gap: .25rem .875rem; margin-top: 0; color: var(--label); }
+.use-legend .key { border-radius: .1875rem; vertical-align: -.0625rem; }
+.key.k-out { background: var(--tint); }
+.key.k-sure { background: var(--meter-track); box-shadow: inset 0 0 0 1.5px var(--tint); }
+.key.k-ahead { background: none; border: 1.5px dashed var(--tint); }
+.key.k-free { background: var(--fill); box-shadow: inset 0 0 0 1px var(--line); }
+.salary { margin-top: 1rem; padding-top: .875rem; border-top: .5px solid var(--line); }
+.salary h3 { font-size: .8125rem; font-weight: 600; }
+.salary .footnote { margin-top: .5rem; }
+/* the month cells and the bracket under the months in the average share their columns */
+.months, .average-mark { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: .25rem; }
+.months { margin-top: .5rem; }
+.months li { display: grid; justify-items: center; gap: .125rem; padding: .4375rem 0; border-radius: .5rem; background: var(--bg); }
+.months span { color: var(--label2); font-size: .6875rem; font-weight: 600; text-transform: uppercase; }
+.months b { font-size: .8125rem; font-weight: 600; }
+@media (max-width: 23rem) { .months b { font-size: .75rem; } } /* the smallest phones: six amounts still fit */
+.months .in-average { background: var(--meter-track); }
+.months .in-average b { color: var(--link); }
+.months .this { padding: calc(.4375rem - 1.5px) 0; border: 1.5px dashed var(--quiet); background: none; }
+.average-mark { margin-top: .5rem; }
+.average-mark p { position: relative; padding-top: .25rem; border-top: 1.5px solid var(--tint); color: var(--link); font-size: .8125rem; font-weight: 600; text-align: center; white-space: nowrap; }
+.average-mark p::before, .average-mark p::after { content: ""; position: absolute; top: -.4375rem; width: 1.5px; height: .375rem; background: var(--tint); }
+.average-mark p::before { left: 0; }
+.average-mark p::after { right: 0; }
+.average-mark .span-1 { text-align: left; } /* one cell is too narrow for the words: they run on to the right */
+.average-mark .span-2 { grid-column: span 2; }
+.average-mark .span-3 { grid-column: span 3; }
+/* to do: a coloured tile in front of each line, so the separators start after it */
+.todos > * + *::before { left: 3.625rem; }
+.todo-icon { flex: none; display: grid; place-items: center; width: 1.875rem; height: 1.875rem; border-radius: .5rem; background: var(--meter-track); color: var(--link); }
+.todo-icon .icon { width: 1.125rem; height: 1.125rem; }
+.todo-icon.warn { background: var(--soon-bg); color: var(--soon); }
+/* the pots in one card: name and what is left, the bar with today's mark, what was spent of the amount */
+.section + :is(.pots, .worth-card) { margin-top: 0; }
+.pots, .worth-card { padding: .875rem 1rem 1rem; }
+.pot-line { display: block; }
+.pot-line + .pot-line { margin-top: .875rem; }
+.pot-head { display: flex; justify-content: space-between; gap: .75rem; margin-bottom: .375rem; font-size: .9375rem; }
+.pot-head > :last-child { flex: none; white-space: nowrap; }
+.pot-line .meter { display: block; }
+.pot-line small { display: block; margin-top: .3125rem; color: var(--label2); font-size: .8125rem; }
+.key.today { width: 2px; height: .75rem; margin-right: .3125rem; border-radius: 1px; background: var(--label); vertical-align: -.125rem; }
+.dated > * + *::before { left: 4.5rem; } /* after the calendar page */
+.spark { display: block; width: 100%; height: auto; margin-top: .5rem; }
+.spark polyline { fill: none; stroke: var(--tint); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.spark circle { fill: var(--tint); }
+.worth-card .footnote { margin-top: .25rem; }
+.worth-card .plus { color: var(--plus); }
+.pot-line { transition: opacity .12s; }
+.pot-line:active { opacity: .6; }
 
 /* ---------- finding transactions ---------- */
 .search { display: flex; align-items: center; gap: .5rem; margin-top: .625rem; padding: .4375rem .75rem; border-radius: .75rem; background: var(--fill); color: var(--label2); }

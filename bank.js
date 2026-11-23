@@ -626,6 +626,19 @@ export function dayRate(bank, purchases, today) {
   return before > 0 ? (now + figures(small, purchases, from, start).spending / before * STEADY) / (day + STEADY) : now / day;
 }
 
+// The salary `month` is held against: the Salaris category on average over the three months before it. A month
+// counts only when it is in the data from its first day and something was spent in it, so while the data is younger
+// the average is of the months there are. `past`: those months of the five before `month`, each with its figures;
+// `counted`: the ones in the average; `usual`: the average in cents, 0 when there is none.
+export function salaryBase(bank, purchases, month) {
+  const past = [5, 4, 3, 2, 1].map((back) => shiftMonth(month, -back))
+    .map((each) => ({ month: each, ...figures(bank, purchases, `${each}-01`, `${shiftMonth(each, 1)}-01`) }))
+    .filter((each) => `${each.month}-01` >= bank.since && each.spending > 0);
+  const counted = past.filter((each) => each.month >= shiftMonth(month, -3));
+  const usual = counted.length ? Math.round(counted.reduce((sum, each) => sum + (each.byCat.get('salaris') ?? 0), 0) / counted.length) : 0;
+  return { past, counted, usual };
+}
+
 // ---------- planned payments ----------
 // A payment the user knows is coming: bank.planned = [{ id, name, cents, date, since }]. `cents` is what it will
 // cost, `date` the day it is expected and `since` the day it was planned. It belongs to the month of its date.

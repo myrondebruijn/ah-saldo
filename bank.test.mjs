@@ -452,6 +452,23 @@ test('dayRate: everyday payments set the pace; a large one, money back, a fixed 
   assert.equal(Math.round(bank.dayRate({ ...data, txs: [...data.txs, tx({ name: 'Krant', cents: -4600, date: '2026-10-06' })] }, [], '2026-10-07')), 2379);
 });
 
+test('salaryBase: the salary of the three months before, of the months there are while the data is younger', () => {
+  const data = withTxs(...['2026-06', '2026-07', '2026-08', '2026-09', '2026-10', '2026-11'].flatMap((month, index) => [
+    tx({ name: 'Werkgever', cents: 300000 + index * 10000, date: `${month}-20`, cat: 'salaris' }),
+    tx({ name: 'Bakker', cents: -1000, date: `${month}-05` }),
+  ]));
+  // November is held against August to October: (€3,200 + €3,300 + €3,400) / 3; June and July are shown, not counted
+  const base = bank.salaryBase(data, [], '2026-11');
+  assert.deepEqual(base.past.map((each) => each.month), ['2026-06', '2026-07', '2026-08', '2026-09', '2026-10']);
+  assert.deepEqual(base.counted.map((each) => each.month), ['2026-08', '2026-09', '2026-10']);
+  assert.equal(base.usual, 330000);
+  // a month that is not in the data from its first day does not count
+  assert.deepEqual(bank.salaryBase({ ...data, since: '2026-09-15' }, [], '2026-11').counted.map((each) => each.month), ['2026-10']);
+  assert.equal(bank.salaryBase({ ...data, since: '2026-09-15' }, [], '2026-11').usual, 340000);
+  // the first month of the data has nothing to go by
+  assert.equal(bank.salaryBase({ ...data, since: '2026-11-01' }, [], '2026-11').usual, 0);
+});
+
 test('planned payments stay open until the bank shows a payment of about that amount', () => {
   const data = withTxs(
     tx({ id: 'trip', name: 'Reisbureau', cents: -205000, date: '2026-11-25' }),
