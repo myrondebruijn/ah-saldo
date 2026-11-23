@@ -230,6 +230,27 @@
     </form>
   </dialog>
 
+  <dialog id="stockDialog" class="sheet" aria-labelledby="stockTitle">
+    <form method="dialog" novalidate>
+      <header class="sheet-bar">
+        <button type="button" class="text-button" data-action="close" data-en="Cancel">Annuleren</button>
+        <h2 id="stockTitle" data-en="Share or fund">Aandeel of fonds</h2>
+        <button class="text-button strong" value="ok" data-en="Save">Opslaan</button>
+      </header>
+      <p class="group-note" id="stockNote"></p>
+      <div class="group">
+        <label class="field"><span data-en="How many you hold">Aantal dat je hebt</span>
+          <input name="qty" inputmode="decimal" autocomplete="off" placeholder="0">
+        </label>
+      </div>
+      <div class="group" id="stockFound"></div>
+      <p class="error" role="alert"></p>
+      <div class="group" id="stockDeleteGroup">
+        <button type="button" class="row danger" data-action="deleteStock" data-en="Remove from the list">Uit de lijst halen</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="textDialog" class="sheet" aria-labelledby="textTitle">
     <form method="dialog" novalidate>
       <header class="sheet-bar">

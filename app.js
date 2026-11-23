@@ -6,7 +6,7 @@ import {
 import {
   AH, LARGE, START_CATS, US, addBalance, addFile, addStarter, balanceOn, byParty, cardsOn, catchUp, decodeText, dayRate, dueOn, emptyBank, ended, figures, fixedCosts,
   fixedSuggestions, forWhom, giftGuesses, giftsBought, giftsToFill, hasGap, heldShops, inCategory, monthOf, parseBank, payFrom, plannedOpen, readCsv, salaryBase,
-  addLinked, readLinked, readOpenbank, ruleKey, shiftMonth, sorter,
+  addLinked, invested, isStock, readLinked, readOpenbank, ruleKey, shiftMonth, sorter, stocksWorth,
 } from './bank.js';
 import {
   api, b64u, fromB64u, inviteId, isCode, makePasskey, merge, openData, rand, sealData, tokenOf, unwrap, usePasskey, wrap,
@@ -394,6 +394,34 @@ async function backFromBank(params) {
   }
 }
 
+// ---------- share prices ----------
+// What the shares on Beleggen are worth: the Kassa server asks for their prices (worker/quotes.js), at most once an
+// hour per phone and at once when the list of shares changed. The prices stay on this phone: they are not shared data.
+
+const QUOTES_KEY = `${KEY}-quotes`; // on this phone: { at: the last try, ids: the shares it was for, ok: the last fetch, prices: { id: euros for one } }
+let quotes = readQuotes();
+
+function readQuotes() {
+  try {
+    return { prices: {}, ...JSON.parse(localStorage.getItem(QUOTES_KEY)) };
+  } catch {
+    return { prices: {} };
+  }
+}
+
+async function fetchQuotes() {
+  const ids = bank.stocks.map((stock) => stock.id).sort().join(',');
+  if (!sharing || !ids || (ids === quotes.ids && Date.now() - (quotes.at ?? 0) < HOUR)) return;
+  Object.assign(quotes, { at: Date.now(), ids }); // a failed try waits an hour too
+  try {
+    const got = await api('GET', `/quotes?s=${encodeURIComponent(ids)}`, { token: await tokenOf(household) });
+    // a share that got no price this time keeps the last one it had
+    quotes = { ...quotes, ok: Date.now(), prices: { ...quotes.prices, ...Object.fromEntries(Object.entries(got).filter(([, euros]) => euros > 0)) } };
+    if (['', 'beleggen'].includes(route())) render(); // the screens that show them; elsewhere a redraw would only disturb
+  } catch { /* the last prices stay */ }
+  localStorage.setItem(QUOTES_KEY, JSON.stringify(quotes));
+}
+
 // ---------- notifications ----------
 // Web Push from the Kassa server (worker/index.js says when). iOS shows them only for Kassa on the Home Screen, and
 // asks permission only straight from a tap, so the server's key is fetched ahead.
@@ -497,6 +525,10 @@ const monthShort = (month) => monthDate(month).toLocaleDateString(LOCALE, { mont
 const monthLong = (month) => monthDate(month).toLocaleDateString(LOCALE, { month: 'long' });
 const dayBefore = (date) => new Date(Date.parse(date) - 864e5).toISOString().slice(0, 10);
 const dayShort = (day) => new Date(day).toLocaleDateString(LOCALE, { day: 'numeric', month: 'short', timeZone: 'UTC' }).replace('.', '');
+// when something was last fetched: the time when that was today, else the day
+const clockText = (time) => (isoDate(new Date(time)) === isoDate()
+  ? `${L('om', 'at')} ${new Date(time).toLocaleTimeString(LOCALE, { hour: '2-digit', minute: '2-digit' })}`
+  : `${L('op', 'on')} ${dayShort(isoDate(new Date(time)))}`);
 const average = (list) => (list.length ? Math.round(list.reduce((sum, each) => sum + each, 0) / list.length) : 0);
 
 const catById = (id) => bank.cats.find((cat) => cat.id === id);
@@ -1038,9 +1070,7 @@ function overviewScreen() {
   ].filter(Boolean);
   // when the bank links last brought news; with sharing off there are none
   const linked = sharing ? Object.keys(links.banks) : [];
-  const clock = links.ok && (isoDate(new Date(links.ok)) === today
-    ? L(`om ${new Date(links.ok).toLocaleTimeString(LOCALE, { hour: '2-digit', minute: '2-digit' })}`, `at ${new Date(links.ok).toLocaleTimeString(LOCALE, { hour: '2-digit', minute: '2-digit' })}`)
-    : L(`op ${dayShort(isoDate(new Date(links.ok)))}`, `on ${dayShort(isoDate(new Date(links.ok)))}`));
+  const clock = links.ok && clockText(links.ok);
   const fetched = !linked.length || !links.ok ? '' : links.failed.length
     ? `<p class="fetched failed">${L(`Ophalen bij ${links.failed.join(' en ')} lukte niet`, `Fetching from ${links.failed.join(' and ')} failed`)}</p>`
     : `<p class="fetched">${L(`${linked.join(' en ')} bijgewerkt ${clock}`, `${linked.join(' and ')} updated ${clock}`)}</p>`;
@@ -1049,6 +1079,8 @@ function overviewScreen() {
   const worths = Array.from({ length: 12 }, (unused, index) => shiftMonth(month, index - 11)).filter((each) => each >= first)
     .map((each) => worthOn(each === month ? '9999' : `${each}-31`));
   const grown = worthOn('9999') - worthOn(dayBefore(`${month}-01` > bank.since ? `${month}-01` : bank.since));
+  const put = invested(bank);
+  const shares = sharesWorth();
   return {
     html: `${title}
       ${fetched}
@@ -1072,7 +1104,58 @@ function overviewScreen() {
         <p class="tile-total">${formatEuro(worthOn('9999'))}</p>
         <p class="footnote${grown >= 0 ? ' plus' : ''}">${signed(grown)} ${L('deze maand', 'this month')}</p>
         ${spark(worths)}
-      </a>`,
+      </a>
+      <h2 class="section">${L('Beleggen', 'Investing')}</h2>
+      ${put || bank.stocks.length ? `
+        <a class="summary worth-card" href="#/beleggen">
+          <p class="tile-total">${formatEuro(shares ?? put)}</p>
+          <p class="footnote${shares !== null && shares >= put ? ' plus' : ''}">${shares === null ? L('ingelegd', 'invested') : `${signed(shares - put)} · ${L('ingelegd', 'invested')} ${formatEuro(put)}`}</p>
+        </a>`
+      : `<div class="group"><a class="row tint" href="#/beleggen">${L('Houd bij wat je aandelen waard zijn', 'Keep track of what your shares are worth')}</a></div>`}`,
+  };
+}
+
+// ---------- investing ----------
+// What was put in is read from the bank lines to the broker (bank.js, invested). What it is worth comes from the
+// shares the user lists and their prices of the last hour; null until there are shares and each has a price.
+
+const sharesWorth = () => (bank.stocks.length ? stocksWorth(bank, quotes.prices) : null);
+
+function investScreen() {
+  const put = invested(bank);
+  const shares = sharesWorth();
+  const row = (stock) => {
+    const euros = quotes.prices[stock.id];
+    return `
+      <li><button class="row" data-action="stock" data-id="${esc(stock.id)}">
+        <span class="row-main">${esc(stock.name)} <small>${stock.qty.toLocaleString(LOCALE, { maximumFractionDigits: 4 })} × ${
+          euros > 0 ? formatEuro(Math.round(euros * 100)) : L('koers nog niet bekend', 'price not known yet')}</small></span>
+        <span class="amount">${euros > 0 ? formatEuro(Math.round(stock.qty * euros * 100)) : ''}</span>
+      </button></li>`;
+  };
+  return {
+    html: `
+      <header class="navbar">${backButton()}<h1>${L('Beleggen', 'Investing')}</h1><span></span></header>
+      <section class="summary period">
+        <p class="footnote center">${shares === null ? L('Ingelegd', 'Invested') : L('Waarde nu', 'Worth now')}</p>
+        <p class="total">${formatEuro(shares ?? put)}</p>
+        ${shares === null ? '' : `<p class="footnote center${shares >= put ? ' plus' : ''}">${signed(shares - put)} · ${L('ingelegd', 'invested')} ${formatEuro(put)}</p>`}
+      </section>
+      <h2 class="section split-head"><span>${L('Aandelen en fondsen', 'Shares and funds')}</span><span>${
+        bank.stocks.length && quotes.ok ? `${L('koersen', 'prices')} ${clockText(quotes.ok)}` : ''}</span></h2>
+      <ul class="group">
+        ${bank.stocks.map(row).join('')}
+        <li><button class="row tint" data-action="addStock">${icon('plus')}<span class="row-main">${L('Aandeel of fonds toevoegen', 'Add a share or fund')}</span></button></li>
+      </ul>
+      <p class="group-note">${L(`Ingelegd is wat van je rekeningen naar DEGIRO (Flatex) ging, min wat terugkwam: dat leest Kassa uit de bankregels.
+        Wat je hebt gekocht staat niet bij de bank. Vul dat hier in, en pas het aantal aan als je bijkoopt of verkoopt.`,
+      `Invested is what went from your accounts to DEGIRO (Flatex), less what came back: Kassa reads that from the bank lines.
+        What you bought is not at the bank. Enter that here, and change the number when you buy more or sell.`)}</p>
+      <p class="group-note">${L(`De koersen worden elk uur opgehaald door de Kassa-server, die daardoor ziet welke aandelen je volgt, niet hoeveel
+        je er hebt. Geld dat bij DEGIRO nog niet is belegd en de kosten van een order zitten niet in de waarde.`,
+      `The prices are fetched every hour by the Kassa server, which therefore sees which shares you follow, not how many
+        you hold. Money at DEGIRO that is not invested yet and the costs of an order are not in the worth.`)}${
+        sharing ? '' : ` ${L('Dat kan alleen als delen aan staat, bij Instellingen.', 'That only works with sharing on, in Settings.')}`}</p>`,
   };
 }
 
@@ -1907,12 +1990,12 @@ const currentPurchase = () => (route() === 'uitgave' ? purchaseById(routeId()) :
 
 const SCREENS = {
   potjes: potsScreen, kaarten: cardsScreen, kaart: cardsScreen, betalen: cardsScreen, archief: archiveScreen, uitgaven: statsScreen, uitgave: statsScreen,
-  inzicht: insightScreen, transacties: transactionsScreen, meer: settingsScreen, categorieen: categoriesScreen, vast: fixedScreen,
+  inzicht: insightScreen, transacties: transactionsScreen, meer: settingsScreen, categorieen: categoriesScreen, vast: fixedScreen, beleggen: investScreen,
   categorie: () => categoryScreen(routeId()),
   saldo: () => balanceScreen(accountById(routeId())),
 };
 // how deep the current address sits, which decides whether a change slides forward or back; the tabs are 0
-const DEPTH = { meer: 1, vast: 1, categorie: 1, archief: 1, uitgaven: 1, kaart: 1, categorieen: 2, uitgave: 2, saldo: 2, betalen: 3 };
+const DEPTH = { meer: 1, vast: 1, categorie: 1, archief: 1, uitgaven: 1, kaart: 1, beleggen: 1, categorieen: 2, uitgave: 2, saldo: 2, betalen: 3 };
 const depth = () => DEPTH[route()] ?? 0;
 let shownDepth = 0;
 let tapped = false; // true when a tap inside the app caused the navigation
@@ -1926,7 +2009,7 @@ const TABS = [
   ['transacties', '#/transacties', 'list', L('Transacties', 'Transactions')],
 ];
 const TAB_OF = {
-  '': 'overzicht', meer: 'overzicht', categorieen: 'overzicht', potjes: 'potjes',
+  '': 'overzicht', meer: 'overzicht', categorieen: 'overzicht', beleggen: 'overzicht', potjes: 'potjes',
   kaarten: 'betalen', kaart: 'betalen', betalen: 'betalen', archief: 'betalen', uitgaven: 'betalen', uitgave: 'betalen',
   inzicht: 'inzicht', transacties: 'transacties',
 };
@@ -2269,6 +2352,27 @@ async function askPlan() {
   if (answer !== 'ok' || !plan) return; // never save a plan that was not filled in: saved data must stay readable
   bank.planned.push({ id: crypto.randomUUID().slice(0, 8), ...plan, since: isoDate() });
   saveBank();
+}
+
+// Asks how many of a share are held: of `stock`, or of the one picked from `found` (what a search gave, at least one).
+// Resolves with { id, name, qty }, 'delete' for a share to take off the list, or null when cancelled.
+async function askStock(stock, found = []) {
+  const form = $('stockDialog').querySelector('form');
+  form.reset();
+  form.elements.qty.value = stock ? String(stock.qty).replace('.', L(',', '.')) : '';
+  $('stockNote').textContent = stock ? `${stock.name} · ${stock.id}` : L('Kies de beurs waar je kocht. De waarde komt altijd in euro.', 'Choose the exchange you bought on. The worth is always in euros.');
+  $('stockDeleteGroup').hidden = !stock;
+  $('stockFound').hidden = Boolean(stock);
+  $('stockFound').innerHTML = found.map((each, index) => `
+    <label class="row choice"><input type="radio" name="pick" value="${index}"${index ? '' : ' checked'}>
+      <span class="row-main">${esc(each.name)} <small>${esc(each.where)} · ${esc(each.id)}</small></span>${icon('check')}</label>`).join('');
+  let next;
+  const answer = await openDialog($('stockDialog'), () => {
+    const { id, name } = stock ?? found[Number(form.elements.pick.value)];
+    next = { id, name, qty: Number(form.elements.qty.value.trim().replace(',', '.')) };
+    return isStock(next) ? '' : L('Vul in hoeveel je er hebt, bijvoorbeeld 3.', 'Enter how many you hold, for example 3.');
+  });
+  return answer === 'ok' ? next : answer === 'delete' ? 'delete' : null;
 }
 
 // Adds a category, or edits `cat` when given. An amount per month makes a spending category a pot.
@@ -2625,6 +2729,46 @@ const actions = {
     bank.planned = bank.planned.filter((each) => each !== plan);
     saveBank();
   },
+  // investing: search for a share, then say how many of it are held; a share on the list already gets the new number
+  async addStock() {
+    if (!sharing) {
+      toast(L('Zet eerst delen aan bij Instellingen: de koersen komen via de Kassa-server.', 'Switch on sharing in Settings first: the prices come through the Kassa server.'));
+      return;
+    }
+    const text = await askText(L('Aandeel of fonds', 'Share or fund'), L('Naam, ticker of ISIN', 'Name, ticker or ISIN'), '',
+      { check: (value) => (value ? '' : L('Vul een naam in.', 'Enter a name.')), max: 60, ok: L('Zoek', 'Search') });
+    if (text === null) return;
+    toast(L('Zoeken…', 'Searching…'));
+    let found;
+    try {
+      found = await api('GET', `/find?q=${encodeURIComponent(text)}`, { token: await tokenOf(household) });
+    } catch (error) {
+      if (error.status === 502) toast(L('De koersen zijn nu niet bereikbaar. Probeer het later opnieuw.', 'The prices cannot be reached now. Try again later.'));
+      else shareError(error);
+      return;
+    }
+    if (!found.length) {
+      toast(L(`Niets gevonden voor ${text}. Probeer de ticker of het ISIN.`, `Nothing found for ${text}. Try the ticker or the ISIN.`));
+      return;
+    }
+    toast('');
+    const stock = await askStock(undefined, found);
+    if (!stock) return;
+    const held = bank.stocks.find((each) => each.id === stock.id);
+    if (held) held.qty = stock.qty;
+    else bank.stocks.push(stock);
+    saveBank();
+    fetchQuotes();
+  },
+  async stock(card, button) {
+    const stock = bank.stocks.find((each) => each.id === button.dataset.id);
+    const next = await askStock(stock);
+    if (!next) return;
+    if (next === 'delete') bank.stocks = bank.stocks.filter((each) => each !== stock);
+    else stock.qty = next.qty;
+    saveBank();
+  },
+  deleteStock: (card, button) => closeDialog(button.closest('dialog'), 'delete'),
   fixedYes(card, button) { bank.fixed[button.dataset.id] = true; saveBank(); },
   fixedNo(card, button) { bank.fixed[button.dataset.id] = false; saveBank(); },
   // which month (or year) the pots, a category, the fixed costs and the insight screen show
@@ -2802,6 +2946,7 @@ sync();
 const back = new URLSearchParams(location.search);
 if (back.has('state')) backFromBank(back);
 else fetchBank();
+fetchQuotes();
 startPush();
 reportMonth();
 document.addEventListener('visibilitychange', () => {
@@ -2809,6 +2954,7 @@ document.addEventListener('visibilitychange', () => {
   if (catchUp(bank, isoDate()).length) saveBank();
   sync(); // what the other phone changed meanwhile
   fetchBank();
+  fetchQuotes();
 });
 addEventListener('online', () => sync());
-setInterval(() => document.hidden || (sync(), fetchBank()), 10_000); // while Kassa is on screen: the other phone's changes show up within seconds
+setInterval(() => document.hidden || (sync(), fetchBank(), fetchQuotes()), 10_000); // while Kassa is on screen: the other phone's changes show up within seconds

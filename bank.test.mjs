@@ -604,3 +604,24 @@ test('a starter file can bring the bank files themselves, read already', () => {
   assert.equal(bank.addFile(data, bank.readCsv(RABO), NOW), 0); // and neither does the bank file itself afterwards
   assert.doesNotThrow(() => bank.parseBank(JSON.parse(JSON.stringify(data))));
 });
+
+test('what was put into shares comes from the bank lines to the broker, their worth from the prices', () => {
+  const data = withTxs(
+    tx({ name: 'Flatex Bank AG', cents: -50000 }), tx({ name: 'flatexDEGIRO Bank AG', cents: -25000 }),
+    tx({ name: 'flatexDEGIRO Bank AG', cents: 10000 }), // money taken out again
+    tx({ name: 'Flatexit Cafe', cents: -900 }),
+  );
+  assert.equal(bank.invested(data), 65000);
+  assert.equal(bank.sorter(data)(data.txs[0]), 'overboeking'); // not spending
+  assert.equal(bank.figures(data, [], '2026-07-01', '2026-08-01').spending, 900);
+  data.stocks = [{ id: 'ASML.AS', name: 'ASML Holding N.V.', qty: 2 }, { id: 'AAPL', name: 'Apple Inc.', qty: 1.5 }];
+  assert.equal(bank.stocksWorth(data, { 'ASML.AS': 600.126, AAPL: 180 }), 120025 + 27000);
+  assert.equal(bank.stocksWorth(data, { 'ASML.AS': 600 }), null); // a price is missing
+  assert.equal(bank.stocksWorth(bank.emptyBank(), {}), 0);
+  assert.equal(bank.invested(bank.emptyBank()), 0); // and not -0, which would be shown with a minus sign
+  assert.deepEqual(bank.parseBank(JSON.parse(JSON.stringify(data))).stocks, data.stocks);
+  assert.deepEqual(bank.parseBank(JSON.parse(JSON.stringify({ ...data, stocks: undefined }))).stocks, []); // saved before there were shares
+  for (const stock of [{ id: 'A B', name: 'x', qty: 1 }, { id: 'A', name: '', qty: 1 }, { id: 'A', name: 'x', qty: 0 }, { id: 'A', name: 'x', qty: '1' }]) {
+    assert.throws(() => bank.parseBank({ ...data, stocks: [stock] }));
+  }
+});

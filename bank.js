@@ -26,7 +26,7 @@ export const START_CATS = [
 ];
 const KINDS = ['out', 'in', 'none'];
 
-export const emptyBank = () => ({ accounts: [], txs: [], cats: START_CATS.map((cat) => ({ ...cat })), rules: {}, fixed: {}, since: '', planned: [] });
+export const emptyBank = () => ({ accounts: [], txs: [], cats: START_CATS.map((cat) => ({ ...cat })), rules: {}, fixed: {}, since: '', planned: [], stocks: [] });
 
 // ---------- reading bank files ----------
 
@@ -326,6 +326,10 @@ export function hasGap(bank, account) {
 // What a rule remembers of a counterparty's name: lower case, without numbers (a shop's branch) and marks.
 export const ruleKey = (name) => name.toLowerCase().replace(/[^a-zà-ÿ]+/g, ' ').trim();
 
+// The broker the shares are held at, as a bank line names it: DEGIRO, whose bank is flatex.
+// shortcut: one broker by name, make it a category of its own when a second broker comes.
+const BROKER = /(^| )(flatex|flatexdegiro|degiro)( |$)/;
+
 // Counterparties sorted without a rule of the user's: the supermarket chains, the chains to eat at, the
 // subscriptions every household knows (streaming, phone and internet), the train and the bus (a trip paid with
 // a bank card comes with a name of its own, "NLOV" and a code), and the shop the gift cards come from.
@@ -335,6 +339,7 @@ const KNOWN = [
   [/^(ns groep|ns reizigers|nlov[a-z]*|ov chipkaart)( |$)/, 'auto'],
   [/^(spotify|netflix|disney plus|hbo max|help hbomax|videoland|amazon prime|youtube premium|apple com bill|openai|odido|youfone|kpn|vodafone|ziggo|simyo|lebara)( |$)/, 'abonnementen'],
   [/^wissel (nederland|nl)( |$)/, 'cadeaukaarten'],
+  [BROKER, 'overboeking'], // money put in is not spent
 ];
 // a payment request from a person named like a shop ("Plus via Tikkie") is nobody's groceries
 const known = (key) => (key.includes('tikkie') ? undefined : KNOWN.find(([pattern]) => pattern.test(key))?.[1]);
@@ -674,6 +679,17 @@ export function plannedOpen(bank, today) {
   });
 }
 
+// ---------- investing ----------
+// Shares held at the broker: bank.stocks = [{ id, name, qty }], where `id` is the ticker the price feed knows the
+// share by (worker/quotes.js) and `qty` how many are held. The user keeps this list; the bank lines say what was put in.
+
+// What went from the accounts to the broker, less what came back, in cents.
+export const invested = (bank) => bank.txs.reduce((sum, tx) => sum - (BROKER.test(ruleKey(tx.name)) ? tx.cents : 0), 0);
+
+// What the shares are worth in cents at `prices` (id -> euros for one); null while a share has no price.
+export const stocksWorth = (bank, prices) => bank.stocks.reduce((sum, stock) =>
+  (sum === null || !(prices[stock.id] > 0) ? null : sum + Math.round(stock.qty * prices[stock.id] * 100)), 0);
+
 // ---------- balances ----------
 
 // An account's balance at the end of `date`: the newest balance known, less everything booked after that day.
@@ -726,6 +742,8 @@ const isSaved = (account) => isAccount(account) && (account.through === '' || is
 const isCat = (cat) => isId(cat?.id) && isName(cat.name) && KINDS.includes(cat.kind)
   && (cat.budget === undefined || (Number.isInteger(cat.budget) && cat.budget > 0));
 const isPlan = (plan) => isId(plan?.id) && isName(plan.name) && Number.isInteger(plan.cents) && plan.cents > 0 && isDate(plan.date) && isDate(plan.since);
+export const isStock = (stock) => typeof stock?.id === 'string' && /^[\w.=^-]{1,20}$/.test(stock.id)
+  && isText(stock.name, 60) && stock.name.length > 0 && Number.isFinite(stock.qty) && stock.qty > 0 && stock.qty <= 1e9;
 const isRules = (rules, isValue) => typeof rules === 'object' && rules !== null && !Array.isArray(rules)
   && Object.entries(rules).every(([key, value]) => isText(key, 60) && key.length > 0 && isValue(value));
 
@@ -737,7 +755,8 @@ export function parseBank(data) {
     && Array.isArray(data.cats) && data.cats.every(isCat) && new Set(data.cats.map((cat) => cat.id)).size === data.cats.length
     && isRules(data.rules, isId) && isRules(data.fixed, (value) => typeof value === 'boolean')
     && (data.since === '' || isDate(data.since))
-    && (data.planned === undefined || (Array.isArray(data.planned) && data.planned.every(isPlan))); // data saved before there were plans has none
+    && (data.planned === undefined || (Array.isArray(data.planned) && data.planned.every(isPlan))) // data saved before there were plans has none
+    && (data.stocks === undefined || (Array.isArray(data.stocks) && data.stocks.every(isStock))); // nor shares
   if (!ok) throw new Error('invalid bank data');
   return {
     accounts: data.accounts.map(({ id, name, bank, balance, holder, card, through, uploaded, shop, monthly = [] }) => ({
@@ -753,6 +772,7 @@ export function parseBank(data) {
     cats: data.cats.map(({ id, name, kind, budget }) => ({ id, name, kind, ...(budget && { budget }) })),
     rules: { ...data.rules }, fixed: { ...data.fixed }, since: data.since,
     planned: (data.planned ?? []).map(({ id, name, cents, date, since }) => ({ id, name, cents, date, since })),
+    stocks: (data.stocks ?? []).map(({ id, name, qty }) => ({ id, name, qty })),
   };
 }
 

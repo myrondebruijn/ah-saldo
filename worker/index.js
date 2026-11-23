@@ -26,8 +26,13 @@
 // DELETE /push/:id                                    (token) not any more
 // POST /month         { month, missing, spending, income, open }  (token) how far a phone got with closing last month:
 //                                                     the account names still missing, or none and the month's totals
+//
+// Share prices (see quotes.js). The server sees which shares the household asks about, not how many it holds.
+// GET  /find?q=TEXT   -> [{ id, name, where }]        (token) shares and funds by name, ticker or ISIN
+// GET  /quotes?s=A,B  -> { A: 12.34, B: null }        (token) the last price of each in euros
 
 import { makeVapid, send } from './push.js';
+import { find, isSymbols, prices } from './quotes.js';
 
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
@@ -331,6 +336,14 @@ async function handle(request, env, ctx) {
   if (route === 'DELETE /invite') {
     await db.prepare('DELETE FROM invites').run();
     return fail(204);
+  }
+  if (route === 'GET /find') {
+    const text = (url.searchParams.get('q') ?? '').trim();
+    return text && text.length <= 60 ? json(await find(text)) : fail(400);
+  }
+  if (route === 'GET /quotes') {
+    const symbols = (url.searchParams.get('s') ?? '').split(',');
+    return isSymbols(symbols) ? json(await prices(symbols)) : fail(400);
   }
   return fail(404);
 }
