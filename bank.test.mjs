@@ -605,23 +605,43 @@ test('a starter file can bring the bank files themselves, read already', () => {
   assert.doesNotThrow(() => bank.parseBank(JSON.parse(JSON.stringify(data))));
 });
 
-test('what was put into shares comes from the bank lines to the broker, their worth from the prices', () => {
+test('what was put in comes from the bank lines sorted as Beleggen, the rest from the purchases', () => {
+  const own = { ...tx({ name: 'Degiro inleg van spaarrekening', cents: -43000 }), own: true }; // between own accounts, the broker only mentioned
   const data = withTxs(
-    tx({ name: 'Flatex Bank AG', cents: -50000 }), tx({ name: 'flatexDEGIRO Bank AG', cents: -25000 }),
-    tx({ name: 'flatexDEGIRO Bank AG', cents: 10000 }), // money taken out again
-    tx({ name: 'Flatexit Cafe', cents: -900 }),
+    tx({ name: 'Flatex Bank AG', cents: -48500, date: '2026-11-23' }), tx({ name: 'flatexDEGIRO Bank AG', cents: -25000, date: '2026-12-02' }),
+    tx({ name: 'flatexDEGIRO Bank AG', cents: 10000, date: '2026-12-20' }), // money taken out again
+    tx({ name: 'Flatexit Cafe', cents: -900 }), tx({ name: 'Overboeking naar degiro', cents: -5000 }), own,
   );
-  assert.equal(bank.invested(data), 65000);
-  assert.equal(bank.sorter(data)(data.txs[0]), 'overboeking'); // not spending
-  assert.equal(bank.figures(data, [], '2026-07-01', '2026-08-01').spending, 900);
-  data.stocks = [{ id: 'ASML.AS', name: 'ASML Holding N.V.', qty: 2 }, { id: 'AAPL', name: 'Apple Inc.', qty: 1.5 }];
-  assert.equal(bank.stocksWorth(data, { 'ASML.AS': 600.126, AAPL: 180 }), 120025 + 27000);
-  assert.equal(bank.stocksWorth(data, { 'ASML.AS': 600 }), null); // a price is missing
-  assert.equal(bank.stocksWorth(bank.emptyBank(), {}), 0);
-  assert.equal(bank.invested(bank.emptyBank()), 0); // and not -0, which would be shown with a minus sign
-  assert.deepEqual(bank.parseBank(JSON.parse(JSON.stringify(data))).stocks, data.stocks);
-  assert.deepEqual(bank.parseBank(JSON.parse(JSON.stringify({ ...data, stocks: undefined }))).stocks, []); // saved before there were shares
-  for (const stock of [{ id: 'A B', name: 'x', qty: 1 }, { id: 'A', name: '', qty: 1 }, { id: 'A', name: 'x', qty: 0 }, { id: 'A', name: 'x', qty: '1' }]) {
-    assert.throws(() => bank.parseBank({ ...data, stocks: [stock] }));
+  assert.deepEqual(bank.deposits(data).map((line) => line.cents), [10000, -25000, -48500]); // the newest first
+  assert.equal(bank.invested(bank.deposits(data)), 63500);
+  assert.equal(bank.sorter(data)(own), 'overboeking');
+  assert.equal(bank.figures(data, [], '2026-07-01', '2026-08-01').spending, 5900); // what went to the broker is not spent
+  data.txs[0].cat = 'overig'; // sorted out of it by hand: it no longer counts, and the screen can say so
+  assert.equal(bank.invested(bank.deposits(data)), 15000);
+  assert.deepEqual(bank.strayDeposits(data), [data.txs[0]]);
+  data.txs[4].cat = 'beleggen'; // and any line can be sorted into it
+  assert.equal(bank.invested(bank.deposits(data)), 20000);
+  assert.equal(bank.invested([]), 0); // and not -0, which would be shown with a minus sign
+
+  const trade = (over) => ({ id: `t${Math.random()}`.replace('0.', ''), stock: 'VWCE.DE', name: 'Vanguard FTSE All-World', date: '2026-11-23', qty: 3, cents: 48034, ...over });
+  data.trades = [trade(), trade({ qty: 2, cents: 33000 }), trade({ qty: -1, cents: -17000 }),
+    trade({ stock: 'ASML.AS', name: 'ASML', qty: 1, cents: 60000 }), trade({ stock: 'ASML.AS', name: 'ASML', qty: -1, cents: -65000 })];
+  assert.equal(bank.bought(data), 48034 + 33000 - 17000 + 60000 - 65000);
+  assert.deepEqual(bank.holdings(data), [{ stock: 'VWCE.DE', name: 'Vanguard FTSE All-World', qty: 4, cents: 64034 }]); // ASML was sold whole
+  assert.deepEqual(bank.parseBank(JSON.parse(JSON.stringify(data))).trades, data.trades);
+  for (const bad of [{ stock: 'A B' }, { name: '' }, { qty: 0 }, { qty: '3' }, { cents: 1.5 }, { qty: -1, cents: 100 }, { date: '23-11-2026' }]) {
+    assert.throws(() => bank.parseBank({ ...data, trades: [trade(bad)] }));
   }
+});
+
+test('data saved before there was investing still reads, and gets its category', () => {
+  const old = JSON.parse(JSON.stringify(loaded()));
+  delete old.trades;
+  old.cats = old.cats.filter((cat) => cat.id !== 'beleggen');
+  old.stocks = [{ id: 'ASML.AS', name: 'ASML Holding N.V.', qty: 2 }]; // the one day of a list without costs
+  const read = bank.parseBank(old);
+  assert.deepEqual(read.trades, []);
+  assert.equal(read.stocks, undefined);
+  assert.deepEqual(read.cats.at(-1), { id: 'beleggen', name: 'Beleggen', kind: 'none' });
+  assert.equal(bank.parseBank(JSON.parse(JSON.stringify(read))).cats.length, read.cats.length); // added once
 });

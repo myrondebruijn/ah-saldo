@@ -6,7 +6,7 @@ import {
 import {
   AH, LARGE, START_CATS, US, addBalance, addFile, addStarter, balanceOn, byParty, cardsOn, catchUp, decodeText, dayRate, dueOn, emptyBank, ended, figures, fixedCosts,
   fixedSuggestions, forWhom, giftGuesses, giftsBought, giftsToFill, hasGap, heldShops, inCategory, monthOf, parseBank, payFrom, plannedOpen, readCsv, salaryBase,
-  addLinked, invested, isStock, readLinked, readOpenbank, ruleKey, shiftMonth, sorter, stocksWorth,
+  addLinked, bought, deposits, holdings, invested, isTrade, readLinked, readOpenbank, ruleKey, shiftMonth, sorter, strayDeposits,
 } from './bank.js';
 import {
   api, b64u, fromB64u, inviteId, isCode, makePasskey, merge, openData, rand, sealData, tokenOf, unwrap, usePasskey, wrap,
@@ -29,13 +29,16 @@ const ENGLISH_NAMES = new Map([
   [US, 'Us'], ['Anders', 'Other'], ['Boodschappen', 'Groceries'], ['Uit eten', 'Eating out'], ['Abonnementen', 'Subscriptions'],
   ['Auto & vervoer', 'Car & transport'], ['Verzekering & zorg', 'Insurance & health'], ['Winkelen', 'Shopping'], ['Cadeaukaarten', 'Gift cards'],
   ['Reizen', 'Travel'], ['Voor anderen', 'For others'], ['Overig', 'Other'], ['Salaris', 'Salary'], ['Overig inkomen', 'Other income'],
-  ['Overboeking', 'Transfer'], ['Werk & bedrijf', 'Work & business'], ['Aflossing lening', 'Loan repayment'],
+  ['Overboeking', 'Transfer'], ['Beleggen', 'Investing'], ['Werk & bedrijf', 'Work & business'], ['Aflossing lening', 'Loan repayment'],
   ['Creditcard (Amex)', 'Credit card (Amex)'],
 ]);
 const shown = (name) => (lang === 'en' && ENGLISH_NAMES.get(name)) || name;
 const UNITS = { week: 'Week', month: L('Maand', 'Month'), year: L('Jaar', 'Year') };
 const SPAN = { week: 8, month: 6, year: 4 }; // how many periods the chart shows
 const STALE = 30; // days after which the overview asks for new bank files
+// Raise by one when the saved data gains something an older Kassa would drop while saving: the server then lets an
+// older Kassa read but not write (worker/index.js, PUT /vault), until that phone has the new one.
+const DATA = 1;
 const START_IDS = new Set(START_CATS.map((cat) => cat.id));
 const KIND_ORDER = ['out', 'in', 'none'];
 
@@ -176,7 +179,7 @@ async function sync(tries = 3) {
     const now = snapshot();
     if (now !== localStorage.getItem(BASE_KEY)) {
       const me = localStorage.getItem(PUSH_KEY) ?? undefined; // so the server does not tell this phone what it changed itself
-      const sent = await api('PUT', '/vault', { token, body: { base: sharing.version, data: await sealData(household, now), me } })
+      const sent = await api('PUT', '/vault', { token, body: { base: sharing.version, data: await sealData(household, now), me, app: DATA } })
         .catch((error) => {
           if (error.status === 409) return null; // the other phone was first: fetch and join once more
           throw error;
@@ -395,10 +398,10 @@ async function backFromBank(params) {
 }
 
 // ---------- share prices ----------
-// What the shares on Beleggen are worth: the Kassa server asks for their prices (worker/quotes.js), at most once an
-// hour per phone and at once when the list of shares changed. The prices stay on this phone: they are not shared data.
+// What the funds on Beleggen are worth: the Kassa server asks for their prices (worker/quotes.js), at most once an
+// hour per phone and at once when other funds are held. The prices stay on this phone: they are not shared data.
 
-const QUOTES_KEY = `${KEY}-quotes`; // on this phone: { at: the last try, ids: the shares it was for, ok: the last fetch, prices: { id: euros for one } }
+const QUOTES_KEY = `${KEY}-quotes`; // on this phone: { at: the last try, ids: the funds it was for, ok: the last fetch, prices: { ticker: euros for one } }
 let quotes = readQuotes();
 
 function readQuotes() {
@@ -410,14 +413,14 @@ function readQuotes() {
 }
 
 async function fetchQuotes() {
-  const ids = bank.stocks.map((stock) => stock.id).sort().join(',');
+  const ids = holdings(bank).map((fund) => fund.stock).sort().join(',');
   if (!sharing || !ids || (ids === quotes.ids && Date.now() - (quotes.at ?? 0) < HOUR)) return;
   Object.assign(quotes, { at: Date.now(), ids }); // a failed try waits an hour too
   try {
     const got = await api('GET', `/quotes?s=${encodeURIComponent(ids)}`, { token: await tokenOf(household) });
     // a share that got no price this time keeps the last one it had
     quotes = { ...quotes, ok: Date.now(), prices: { ...quotes.prices, ...Object.fromEntries(Object.entries(got).filter(([, euros]) => euros > 0)) } };
-    if (['', 'beleggen'].includes(route())) render(); // the screens that show them; elsewhere a redraw would only disturb
+    if (['', 'beleggen', 'inzicht'].includes(route())) render(); // the screens that show them; elsewhere a redraw would only disturb
   } catch { /* the last prices stay */ }
   localStorage.setItem(QUOTES_KEY, JSON.stringify(quotes));
 }
@@ -669,10 +672,10 @@ const columnShape = (x, width, height, name = '') => (height >= 8
 const columnHeight = (total, most) => (most > 0 && total > 0 ? Math.max(Math.round(total / most * 88), 2) : 0);
 
 // Columns for a run of periods: the chosen one in blue, the others grey. A tap on a column chooses it.
-// periods: [{ id, name, short, total, chosen }]
-function columnChart(periods, action) {
+// periods: [{ id, name, short, total, chosen }]; `kind` 'flow' draws them as narrow as the in/out chart's, for twelve months
+function columnChart(periods, action, kind = '') {
   const most = Math.max(0, ...periods.map((period) => period.total));
-  return `<ul class="columns">${periods.map(({ id, name, short, total, chosen }) => {
+  return `<ul class="columns${kind && ` ${kind}`}">${periods.map(({ id, name, short, total, chosen }) => {
     const label = `${name}: ${formatEuro(total)}`;
     return `
       <li><button class="column" data-action="${action}" data-id="${id}" aria-pressed="${chosen}" aria-label="${label}" title="${label}">
@@ -1079,8 +1082,6 @@ function overviewScreen() {
   const worths = Array.from({ length: 12 }, (unused, index) => shiftMonth(month, index - 11)).filter((each) => each >= first)
     .map((each) => worthOn(each === month ? '9999' : `${each}-31`));
   const grown = worthOn('9999') - worthOn(dayBefore(`${month}-01` > bank.since ? `${month}-01` : bank.since));
-  const put = invested(bank);
-  const shares = sharesWorth();
   return {
     html: `${title}
       ${fetched}
@@ -1106,56 +1107,162 @@ function overviewScreen() {
         ${spark(worths)}
       </a>
       <h2 class="section">${L('Beleggen', 'Investing')}</h2>
-      ${put || bank.stocks.length ? `
-        <a class="summary worth-card" href="#/beleggen">
-          <p class="tile-total">${formatEuro(shares ?? put)}</p>
-          <p class="footnote${shares !== null && shares >= put ? ' plus' : ''}">${shares === null ? L('ingelegd', 'invested') : `${signed(shares - put)} · ${L('ingelegd', 'invested')} ${formatEuro(put)}`}</p>
-        </a>`
-      : `<div class="group"><a class="row tint" href="#/beleggen">${L('Houd bij wat je aandelen waard zijn', 'Keep track of what your shares are worth')}</a></div>`}`,
+      ${investCard()}`,
   };
 }
 
 // ---------- investing ----------
-// What was put in is read from the bank lines to the broker (bank.js, invested). What it is worth comes from the
-// shares the user lists and their prices of the last hour; null until there are shares and each has a price.
+// What was put in comes from the bank lines sorted as Beleggen, and what was bought with it from the purchases the
+// user enters (bank.js). A fund is worth its price of the last hour; what was put in and not spent on a fund is still
+// cash at the broker. `shares`, `worth` and `result` are null while a fund has no price yet.
+function investFigures() {
+  const lines = deposits(bank);
+  const put = invested(lines);
+  const funds = holdings(bank).map((fund) => {
+    const euros = quotes.prices[fund.stock];
+    return { ...fund, euros, worth: euros > 0 ? Math.round(fund.qty * euros * 100) : null };
+  });
+  const cash = put - bought(bank);
+  const shares = funds.every((fund) => fund.worth !== null) ? funds.reduce((sum, fund) => sum + fund.worth, 0) : null;
+  const worth = shares === null ? null : shares + cash;
+  return { lines, put, funds, cash, shares, worth, result: worth === null ? null : worth - put };
+}
 
-const sharesWorth = () => (bank.stocks.length ? stocksWorth(bank, quotes.prices) : null);
+const count = (qty) => Math.abs(qty).toLocaleString(LOCALE, { maximumFractionDigits: 4 });
+const pricesAt = () => (holdings(bank).length && quotes.ok ? `${L('koersen', 'prices')} ${clockText(quotes.ok)}` : '');
+const noPrices = () => (sharing ? L('De koersen worden opgehaald.', 'The prices are being fetched.')
+  : L('Koersen ophalen kan alleen als delen aan staat, bij Instellingen.', 'Prices can only be fetched with sharing on, in Settings.'));
+
+// A result as a label: the amount and, with something to hold it against (`of`), the share. A gain is green; a loss
+// stays plain, as red is kept for a pot that is overspent and a period that ended short.
+function resultLabel(cents, of = 0) {
+  const share = of > 0 ? ` · ${cents < 0 ? '−' : '+'}${(Math.abs(cents) / of * 100).toLocaleString(LOCALE, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%` : '';
+  return `<span class="change${cents > 0 ? ' gain' : ''}">${signed(cents)}${share}</span>`;
+}
+
+// Overview: what was put in beside what it is worth now, and the difference since the start.
+function investCard() {
+  const { put, worth, result } = investFigures();
+  if (!put && !bank.trades.length) {
+    return `<div class="group"><a class="row tint" href="#/beleggen">${L('Houd bij wat je beleggingen waard zijn', 'Keep track of what your investments are worth')}</a></div>`;
+  }
+  return `
+    <a class="summary worth-card" href="#/beleggen">
+      <div class="pair">
+        <div><p class="footnote">${L('Ingelegd', 'Invested')}</p><p class="tile-total">${formatEuro(put)}</p></div>
+        <div><p class="footnote">${L('Waarde nu', 'Worth now')}</p><p class="tile-total">${worth === null ? '—' : formatEuro(worth)}</p></div>
+      </div>
+      <p class="footnote result">${worth === null ? noPrices()
+        : !bank.trades.length ? L('Vul in wat je kocht om het resultaat te zien.', 'Enter what you bought to see the result.')
+          : `${resultLabel(result, put)} ${L('sinds de start', 'since the start')}`}</p>
+    </a>`;
+}
+
+// The worth now beside what was put in, the result since the start, and a bar for where the money is: in funds, or
+// not invested yet.
+function investTop({ put, cash, shares, worth, result }) {
+  if (worth === null) {
+    return `<div class="summary-top"><p class="footnote">${L('Waarde nu', 'Worth now')}</p><p class="footnote">${L('ingelegd', 'invested')} ${formatEuro(put)}</p></div>
+      <p class="total small">—</p><p class="footnote result">${noPrices()}${cash >= 0 ? ` ${L('Nog niet belegd', 'Not invested yet')}: ${formatEuro(cash)}.` : ''}</p>`;
+  }
+  return `
+    <div class="summary-top"><p class="footnote">${L('Waarde nu', 'Worth now')}</p><p class="footnote">${L('ingelegd', 'invested')} ${formatEuro(put)}</p></div>
+    <p class="total small">${formatEuro(worth)}</p>
+    <p class="footnote result">${bank.trades.length ? `${resultLabel(result, put)} ${L('sinds de start', 'since the start')}`
+      : L('Vul in wat je kocht om het resultaat te zien.', 'Enter what you bought to see the result.')}</p>
+    ${cash < 0 ? `<p class="footnote result">${L(`Er is ${formatEuro(-cash)} meer gekocht dan ingelegd. Mist er een storting, of klopt een aankoop niet?`,
+      `${formatEuro(-cash)} more was bought than invested. Is a deposit missing, or is a purchase wrong?`)}</p>`
+    : worth > 0 ? `
+      <div class="split">
+        ${meterBar(shares / worth)}
+        <p class="legend"><span><i class="key fixed"></i>${L('In fondsen', 'In funds')} ${formatEuro(shares)}</span>
+          <span><i class="key rest"></i>${L('Nog niet belegd', 'Not invested yet')} ${formatEuro(cash)}</span></p>
+      </div>` : ''}`;
+}
+
+// A fund held: how many at which price and what they cost, its worth and, under it, the result. `open` and `close`
+// make the row a link or a button. Once some of it was sold, what it cost is what was paid less what came back.
+const fundRow = (fund, open, close) => `
+  <li>${open}
+    <span class="row-main">${esc(fund.name)} <small>${count(fund.qty)} × ${fund.euros > 0 ? formatEuro(Math.round(fund.euros * 100)) : L('koers nog niet bekend', 'price not known yet')}
+      · ${bank.trades.some((trade) => trade.stock === fund.stock && trade.qty < 0) ? L('per saldo betaald', 'net paid') : L('gekocht voor', 'bought for')} ${formatEuro(fund.cents)}</small></span>
+    ${fund.worth === null ? '' : `<span class="stack"><span class="amount">${formatEuro(fund.worth)}</span>${resultLabel(fund.worth - fund.cents)}</span>`}
+  ${close}</li>`;
+
+// Insight: the worth and where it is, what was put in month by month (a tap on a month chooses it, as on the chart
+// at the top), and each fund. `months`: the months of the charts; `chosen`: the month on screen, a year when that is shown.
+function investInsight(months, chosen) {
+  const now = investFigures();
+  if (!now.put && !bank.trades.length) return '';
+  const during = (list, period) => list.filter((each) => each.date.startsWith(period));
+  const put = invested(during(now.lines, chosen));
+  const sum = (trades) => trades.reduce((total, trade) => total + Math.abs(trade.cents), 0);
+  const paid = sum(during(bank.trades, chosen).filter((trade) => trade.qty > 0));
+  const back = sum(during(bank.trades, chosen).filter((trade) => trade.qty < 0));
+  const name = chosen.length === 4 ? chosen : monthName(chosen);
+  const money = Math.max(put, paid, back) >= 1000000 ? wholeEuro : formatEuro; // three amounts of five digits and cents do not fit side by side
+  return `
+    <h2 class="section split-head" id="beleggen"><span>${L('Beleggen', 'Investing')}</span><span>${pricesAt()}</span></h2>
+    <section class="summary worth">
+      ${investTop(now)}
+      <div class="detail">
+        <p class="use-head"><strong>${L('Ingelegd per maand', 'Invested per month')}</strong><span>${name}</span></p>
+        ${columnChart(months.map((month) => ({ id: month, name: monthName(month), short: monthShort(month),
+          total: Math.max(0, invested(during(now.lines, month))), chosen: month === chosen })), 'pickMonth', 'flow')}
+        <dl class="trio">
+          <div><dt>${L('Ingelegd', 'Invested')}</dt><dd>${money(put)}</dd></div>
+          <div><dt>${L('Gekocht', 'Bought')}</dt><dd>${money(paid)}</dd></div>
+          <div><dt>${L('Verkocht', 'Sold')}</dt><dd>${money(back)}</dd></div>
+        </dl>
+      </div>
+    </section>
+    <ul class="group">
+      ${now.funds.map((fund) => fundRow(fund, '<a class="row" href="#/beleggen">', `${icon('next')}</a>`)).join('')}
+      <li><a class="row" href="#/beleggen"><span class="row-main">${L('Aankopen en stortingen', 'Purchases and deposits')}</span>${icon('next')}</a></li>
+    </ul>`;
+}
 
 function investScreen() {
-  const put = invested(bank);
-  const shares = sharesWorth();
-  const row = (stock) => {
-    const euros = quotes.prices[stock.id];
-    return `
-      <li><button class="row" data-action="stock" data-id="${esc(stock.id)}">
-        <span class="row-main">${esc(stock.name)} <small>${stock.qty.toLocaleString(LOCALE, { maximumFractionDigits: 4 })} × ${
-          euros > 0 ? formatEuro(Math.round(euros * 100)) : L('koers nog niet bekend', 'price not known yet')}</small></span>
-        <span class="amount">${euros > 0 ? formatEuro(Math.round(stock.qty * euros * 100)) : ''}</span>
-      </button></li>`;
-  };
+  const now = investFigures();
+  const catOf = sorter(bank);
+  const stray = strayDeposits(bank);
+  const trades = [...bank.trades].sort((a, b) => b.date.localeCompare(a.date));
+  const tradeRow = (trade) => `
+    <li><button class="row tx" data-action="editTrade" data-id="${esc(trade.id)}">
+      <span class="row-main">${trade.qty < 0 ? L('Verkocht', 'Sold') : L('Gekocht', 'Bought')} ${count(trade.qty)} × ${formatEuro(Math.round(trade.cents / trade.qty))}
+        <small>${dayShort(trade.date)} · ${esc(trade.name)}</small></span>
+      <span class="amount${trade.qty < 0 ? ' plus' : ''}">${trade.qty < 0 ? signed(-trade.cents) : formatEuro(trade.cents)}</span>
+    </button></li>`;
   return {
     html: `
       <header class="navbar">${backButton()}<h1>${L('Beleggen', 'Investing')}</h1><span></span></header>
-      <section class="summary period">
-        <p class="footnote center">${shares === null ? L('Ingelegd', 'Invested') : L('Waarde nu', 'Worth now')}</p>
-        <p class="total">${formatEuro(shares ?? put)}</p>
-        ${shares === null ? '' : `<p class="footnote center${shares >= put ? ' plus' : ''}">${signed(shares - put)} · ${L('ingelegd', 'invested')} ${formatEuro(put)}</p>`}
-      </section>
-      <h2 class="section split-head"><span>${L('Aandelen en fondsen', 'Shares and funds')}</span><span>${
-        bank.stocks.length && quotes.ok ? `${L('koersen', 'prices')} ${clockText(quotes.ok)}` : ''}</span></h2>
+      <section class="summary worth">${investTop(now)}</section>
+      <h2 class="section split-head"><span>${L('Fondsen', 'Funds')}</span><span>${pricesAt()}</span></h2>
       <ul class="group">
-        ${bank.stocks.map(row).join('')}
-        <li><button class="row tint" data-action="addStock">${icon('plus')}<span class="row-main">${L('Aandeel of fonds toevoegen', 'Add a share or fund')}</span></button></li>
+        ${now.funds.map((fund) => fundRow(fund, `<button class="row" data-action="trade" data-id="${esc(fund.stock)}">`, '</button>')).join('')}
+        <li><button class="row tint" data-action="addTrade">${icon('plus')}<span class="row-main">${
+          now.funds.length ? L('Ander fonds gekocht', 'Bought another fund') : L('Aankoop invullen', 'Enter a purchase')}</span></button></li>
       </ul>
-      <p class="group-note">${L(`Ingelegd is wat van je rekeningen naar DEGIRO (Flatex) ging, min wat terugkwam: dat leest Kassa uit de bankregels.
-        Wat je hebt gekocht staat niet bij de bank. Vul dat hier in, en pas het aantal aan als je bijkoopt of verkoopt.`,
-      `Invested is what went from your accounts to DEGIRO (Flatex), less what came back: Kassa reads that from the bank lines.
-        What you bought is not at the bank. Enter that here, and change the number when you buy more or sell.`)}</p>
-      <p class="group-note">${L(`De koersen worden elk uur opgehaald door de Kassa-server, die daardoor ziet welke aandelen je volgt, niet hoeveel
-        je er hebt. Geld dat bij DEGIRO nog niet is belegd en de kosten van een order zitten niet in de waarde.`,
-      `The prices are fetched every hour by the Kassa server, which therefore sees which shares you follow, not how many
-        you hold. Money at DEGIRO that is not invested yet and the costs of an order are not in the worth.`)}${
-        sharing ? '' : ` ${L('Dat kan alleen als delen aan staat, bij Instellingen.', 'That only works with sharing on, in Settings.')}`}</p>`,
+      <p class="group-note">${now.funds.length ? L('Tik op een fonds als je meer koopt of iets verkoopt.', 'Tap a fund when you buy more or sell some.')
+        : L('Zoek het fonds dat je kocht en vul in hoeveel het er waren en wat je in totaal betaalde. Kassa rekent dan uit wat er nog niet belegd is.',
+          'Search for the fund you bought and enter how many there were and what you paid in total. Kassa then works out what is not invested yet.')}</p>
+      ${trades.length ? `
+        <h2 class="section">${L('Aankopen en verkopen', 'Purchases and sales')}</h2>
+        <ul class="group">${trades.map(tradeRow).join('')}</ul>
+        <p class="group-note">${L('Het bedrag is met de kosten van de order; de prijs per stuk dus ook.', 'The amount includes the costs of the order, and so does the price per share.')}</p>` : ''}
+      <h2 class="section split-head"><span>${L('Ingelegd', 'Invested')}</span><span>${formatEuro(now.put)}</span></h2>
+      ${now.lines.length ? `<ul class="group">${now.lines.map((tx) => txRow(tx, catOf, { category: false })).join('')}</ul>` : ''}
+      <p class="group-note">${L(`De bankregels in de categorie Beleggen; een regel naar DEGIRO (Flatex) komt er vanzelf in. Hoort er een niet bij: tik erop en
+        kies een andere categorie. Mist er een: deel hem bij Transacties in als Beleggen.`,
+      `The bank lines in the category Investing; a line to DEGIRO (Flatex) lands in it by itself. If one does not belong: tap it and
+        choose another category. If one is missing: sort it as Investing in Transactions.`)}</p>
+      ${stray.length ? `
+        <ul class="group">${stray.map((tx) => txRow(tx, catOf)).join('')}</ul>
+        <p class="group-note">${L('Van of naar DEGIRO, maar anders ingedeeld: dit telt niet mee als ingelegd.', 'From or to DEGIRO, but sorted as something else: this does not count as invested.')}</p>` : ''}
+      <p class="group-note">${L(`De Kassa-server haalt de koersen elk uur op en ziet daardoor welke fondsen je hebt, niet hoeveel. Kosten buiten een order
+        om en dividend kent Kassa niet: wat niet belegd is, kan daardoor op den duur iets afwijken van DEGIRO.`,
+      `The Kassa server fetches the prices every hour and so sees which funds you hold, not how many. Kassa does not know costs outside an
+        order or dividends: what is not invested may therefore drift a little from the figure at DEGIRO in time.`)}</p>`,
   };
 }
 
@@ -1547,7 +1654,8 @@ function insightScreen() {
             <span class="amount">${formatEuro(balanceOn(bank, account, worthMonth === thisMonth() ? '9999' : `${worthMonth}-31`))}</span></li>`).join('')}
           <li class="row"><span class="row-main">${L('Cadeaukaarten', 'Gift cards')}</span>
             <span class="amount">${formatEuro(cardsOn(state.cards, worthMonth === thisMonth() ? '9999' : `${worthMonth}-31`))}</span></li>
-        </ul>` : ''}`,
+        </ul>` : ''}
+      ${investInsight(chartMonths(), yearly ? year : view.month)}`,
   };
 }
 
@@ -2354,23 +2462,39 @@ async function askPlan() {
   saveBank();
 }
 
-// Asks how many of a share are held: of `stock`, or of the one picked from `found` (what a search gave, at least one).
-// Resolves with { id, name, qty }, 'delete' for a share to take off the list, or null when cancelled.
-async function askStock(stock, found = []) {
-  const form = $('stockDialog').querySelector('form');
+// Asks for a purchase or a sale: of `fund` ({ stock, name }), or of the fund picked from `found` (what a search gave,
+// at least one). `trade` is the one to change. Resolves with the trade, 'delete' to remove `trade`, or null when cancelled.
+async function askTrade({ trade, fund, found = [] }) {
+  const form = $('tradeDialog').querySelector('form');
+  const field = form.elements;
   form.reset();
-  form.elements.qty.value = stock ? String(stock.qty).replace('.', L(',', '.')) : '';
-  $('stockNote').textContent = stock ? `${stock.name} · ${stock.id}` : L('Kies de beurs waar je kocht. De waarde komt altijd in euro.', 'Choose the exchange you bought on. The worth is always in euros.');
-  $('stockDeleteGroup').hidden = !stock;
-  $('stockFound').hidden = Boolean(stock);
-  $('stockFound').innerHTML = found.map((each, index) => `
+  field.qty.value = trade ? String(Math.abs(trade.qty)).replace('.', L(',', '.')) : '';
+  field.amount.value = trade ? euroInput(Math.abs(trade.cents)) : '';
+  field.date.value = trade?.date ?? isoDate();
+  field.sold.checked = trade?.qty < 0;
+  field.sold.onchange = () => {
+    $('tradeTitle').textContent = field.sold.checked ? L('Verkoop', 'Sale') : L('Aankoop', 'Purchase');
+    $('tradeDelete').textContent = field.sold.checked ? L('Deze verkoop verwijderen', 'Delete this sale') : L('Deze aankoop verwijderen', 'Delete this purchase');
+  };
+  field.sold.onchange();
+  $('tradeNote').textContent = fund ? `${fund.name} · ${fund.stock}`
+    : L('Kies de beurs waar je kocht; staat die er niet bij, neem dan de eerste. De waarde komt altijd in euro.', 'Choose the exchange you bought on; if it is not listed, take the first. The worth is always in euros.');
+  $('tradeDeleteGroup').hidden = !trade;
+  $('tradeFound').hidden = Boolean(fund);
+  $('tradeFound').innerHTML = found.map((each, index) => `
     <label class="row choice"><input type="radio" name="pick" value="${index}"${index ? '' : ' checked'}>
-      <span class="row-main">${esc(each.name)} <small>${esc(each.where)} · ${esc(each.id)}</small></span>${icon('check')}</label>`).join('');
+      <span class="row-main">${esc(each.name)} <small>${esc(each.where)} · ${esc(each.stock)}</small></span>${icon('check')}</label>`).join('');
   let next;
-  const answer = await openDialog($('stockDialog'), () => {
-    const { id, name } = stock ?? found[Number(form.elements.pick.value)];
-    next = { id, name, qty: Number(form.elements.qty.value.trim().replace(',', '.')) };
-    return isStock(next) ? '' : L('Vul in hoeveel je er hebt, bijvoorbeeld 3.', 'Enter how many you hold, for example 3.');
+  const answer = await openDialog($('tradeDialog'), () => {
+    const { stock, name } = fund ?? found[Number(field.pick.value)];
+    const qty = Number(field.qty.value.trim().replace(',', '.'));
+    const cents = parseEuro(field.amount.value, 7);
+    const sign = field.sold.checked ? -1 : 1;
+    if (!(qty > 0)) return L('Vul in hoeveel het er waren, bijvoorbeeld 3.', 'Enter how many there were, for example 3.');
+    if (cents === null) return ENTER_AMOUNT;
+    if (!isDate(field.date.value) || field.date.value > isoDate()) return L('Kies vandaag of een eerdere dag.', 'Choose today or an earlier day.');
+    next = { id: trade?.id ?? crypto.randomUUID().slice(0, 8), stock, name, date: field.date.value, qty: sign * qty, cents: sign * cents };
+    return isTrade(next) ? '' : L('Dit kan zo niet worden opgeslagen.', 'This cannot be saved like this.');
   });
   return answer === 'ok' ? next : answer === 'delete' ? 'delete' : null;
 }
@@ -2729,46 +2853,52 @@ const actions = {
     bank.planned = bank.planned.filter((each) => each !== plan);
     saveBank();
   },
-  // investing: search for a share, then say how many of it are held; a share on the list already gets the new number
-  async addStock() {
+  // investing: a purchase of a fund that is not held yet starts with a search for it
+  async addTrade() {
     if (!sharing) {
       toast(L('Zet eerst delen aan bij Instellingen: de koersen komen via de Kassa-server.', 'Switch on sharing in Settings first: the prices come through the Kassa server.'));
       return;
     }
-    const text = await askText(L('Aandeel of fonds', 'Share or fund'), L('Naam, ticker of ISIN', 'Name, ticker or ISIN'), '',
+    const text = await askText(L('Fonds zoeken', 'Find a fund'), L('Naam, ticker of ISIN', 'Name, ticker or ISIN'), '',
       { check: (value) => (value ? '' : L('Vul een naam in.', 'Enter a name.')), max: 60, ok: L('Zoek', 'Search') });
     if (text === null) return;
     toast(L('Zoeken…', 'Searching…'));
     let found;
     try {
-      found = await api('GET', `/find?q=${encodeURIComponent(text)}`, { token: await tokenOf(household) });
+      found = (await api('GET', `/find?q=${encodeURIComponent(text)}`, { token: await tokenOf(household) })).map(({ id, name, where }) => ({ stock: id, name, where }));
     } catch (error) {
       if (error.status === 502) toast(L('De koersen zijn nu niet bereikbaar. Probeer het later opnieuw.', 'The prices cannot be reached now. Try again later.'));
       else shareError(error);
       return;
     }
     if (!found.length) {
-      toast(L(`Niets gevonden voor ${text}. Probeer de ticker of het ISIN.`, `Nothing found for ${text}. Try the ticker or the ISIN.`));
+      toast(L(`Niets gevonden voor ${text}. Probeer de ticker, zoals VWCE.`, `Nothing found for ${text}. Try the ticker, such as VWCE.`));
       return;
     }
     toast('');
-    const stock = await askStock(undefined, found);
-    if (!stock) return;
-    const held = bank.stocks.find((each) => each.id === stock.id);
-    if (held) held.qty = stock.qty;
-    else bank.stocks.push(stock);
+    const trade = await askTrade({ found });
+    if (!trade) return;
+    bank.trades.push(trade);
     saveBank();
     fetchQuotes();
   },
-  async stock(card, button) {
-    const stock = bank.stocks.find((each) => each.id === button.dataset.id);
-    const next = await askStock(stock);
-    if (!next) return;
-    if (next === 'delete') bank.stocks = bank.stocks.filter((each) => each !== stock);
-    else stock.qty = next.qty;
+  // a tap on a fund that is held: more of it was bought, or some of it sold
+  async trade(card, button) {
+    const trade = await askTrade({ fund: holdings(bank).find((fund) => fund.stock === button.dataset.id) });
+    if (!trade) return;
+    bank.trades.push(trade);
     saveBank();
   },
-  deleteStock: (card, button) => closeDialog(button.closest('dialog'), 'delete'),
+  async editTrade(card, button) {
+    const trade = bank.trades.find((each) => each.id === button.dataset.id);
+    const next = await askTrade({ trade, fund: trade });
+    if (!next) return;
+    bank.trades = bank.trades.filter((each) => each !== trade);
+    if (next !== 'delete') bank.trades.push(next);
+    saveBank();
+    fetchQuotes();
+  },
+  deleteTrade: (card, button) => closeDialog(button.closest('dialog'), 'delete'),
   fixedYes(card, button) { bank.fixed[button.dataset.id] = true; saveBank(); },
   fixedNo(card, button) { bank.fixed[button.dataset.id] = false; saveBank(); },
   // which month (or year) the pots, a category, the fixed costs and the insight screen show
@@ -2938,6 +3068,10 @@ if (lang === 'en') {
 
 navigator.storage?.persist?.(); // ask the browser not to evict the cards
 navigator.serviceWorker?.register('sw.js');
+// A newer Kassa was saved on the phone while this one was open: start it, unless that would break off a payment or a sheet.
+if (navigator.serviceWorker?.controller) {
+  navigator.serviceWorker.addEventListener('controllerchange', () => busy() || ['betalen', 'kaart'].includes(route()) || location.reload());
+}
 state = load();
 bank = loadBank();
 if (catchUp(bank, isoDate()).length) saveBank();

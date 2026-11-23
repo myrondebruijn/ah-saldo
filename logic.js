@@ -8,9 +8,9 @@ export const validNumber = (number) => typeof number === 'string' && /^\d{19}$/.
 export const validCode = (code) => typeof code === 'string' && /^\d{6}$/.test(code);
 export const groupNumber = (number) => number.replace(/(\d{4})(?=\d)/g, '$1 ');
 
-// "12", "12,5", "12.50" or "€ 12,50" -> cents; anything else -> null
-export function parseEuro(text) {
-  const match = /^(\d{1,4})(?:[.,](\d{1,2}))?$/.exec(String(text).replace(/[€\s]/g, ''));
+// "12", "12,5", "12.50" or "€ 12,50" -> cents; anything else -> null. `digits`: how many the euros may have
+export function parseEuro(text, digits = 4) {
+  const match = new RegExp(`^(\\d{1,${digits}})(?:[.,](\\d{1,2}))?$`).exec(String(text).replace(/[€\s]/g, ''));
   return match && Number(match[1]) * 100 + Number((match[2] ?? '').padEnd(2, '0'));
 }
 

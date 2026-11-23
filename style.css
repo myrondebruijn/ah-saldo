@@ -401,7 +401,7 @@ a.summary { display: block; }
 /* a difference in spending: more in red, less in green; the words say which, so colour is not the only sign */
 .change { flex: none; display: inline-block; padding: .125rem .5rem; border-radius: 99px; background: var(--fill); color: var(--label); font-size: .8125rem; font-weight: 600; white-space: nowrap; }
 .change.more { background: var(--late-bg); color: var(--late); }
-.change.less { background: var(--plus-bg); color: var(--plus); }
+.change.less, .change.gain { background: var(--plus-bg); color: var(--plus); }
 .versus { margin-top: .75rem; }
 .meter-end { display: flex; align-items: center; gap: .5rem; }
 /* out, split into what the fixed costs took and the rest */
@@ -460,9 +460,9 @@ svg.pace { display: block; width: 100%; height: auto; margin-top: .625rem; overf
 .key.k-sure { background: var(--meter-track); box-shadow: inset 0 0 0 1.5px var(--tint); }
 .key.k-ahead { background: none; border: 1.5px dashed var(--tint); }
 .key.k-free { background: var(--fill); box-shadow: inset 0 0 0 1px var(--line); }
-.salary { margin-top: 1rem; padding-top: .875rem; border-top: .5px solid var(--line); }
-.salary h3 { font-size: .8125rem; font-weight: 600; }
-.salary .footnote { margin-top: .5rem; }
+.salary, .detail { margin-top: 1rem; padding-top: .875rem; border-top: .5px solid var(--line); } /* a second part of a summary cell, under a hairline */
+.salary h3, .detail h3 { font-size: .8125rem; font-weight: 600; }
+.salary .footnote, .detail .footnote { margin-top: .5rem; }
 /* the month cells and the bracket under the months in the average share their columns */
 .months, .average-mark { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: .25rem; }
 .months { margin-top: .5rem; }
@@ -502,6 +502,12 @@ svg.pace { display: block; width: 100%; height: auto; margin-top: .625rem; overf
 .spark circle { fill: var(--tint); }
 .worth-card .footnote { margin-top: .25rem; }
 .worth-card .plus { color: var(--plus); }
+/* investing: what was put in beside what it is worth, the result under them; a fund's result under its worth */
+.pair { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem 1rem; }
+.pair .tile-total { font-size: 1.5rem; white-space: nowrap; } /* two amounts of six digits still stand side by side */
+@media (max-width: 23rem) { .pair { grid-template-columns: 1fr; } }
+.footnote.result { margin-top: .625rem; }
+.stack { flex: none; display: grid; justify-items: end; gap: .25rem; }
 .pot-line { transition: opacity .12s; }
 .pot-line:active { opacity: .6; }
 

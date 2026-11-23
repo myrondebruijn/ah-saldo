@@ -7,7 +7,8 @@
 // GET  /key/:cred     -> { wrapped }                  a passkey's locked copy of the household key
 // POST /key           { cred, wrapped }               (token) add a passkey
 // GET  /vault?have=N  -> { version, data } or 204     (token) the data, unless version N is the newest
-// PUT  /vault         { base, data } -> { version }   (token) only on top of the newest version, else 409
+// PUT  /vault         { base, data, app } -> { version }  (token) only on top of the newest version, else 409;
+//                                                     426 when this phone's Kassa is older than the data (`app`)
 // PUT  /invite        { id, wrapped }                 (token) replaces the open invite; valid for a day
 // GET  /invite/:id    -> { wrapped }                  the invited phone fetches it
 // DELETE /invite                                      (token) the invite was used
@@ -247,9 +248,16 @@ async function handle(request, env, ctx) {
   }
   if (route === 'PUT /vault') {
     if (!Number.isInteger(body.base) || !isText(body.data, MAX)) return fail(400);
+    // A Kassa older than the one that wrote the data reads it, keeps what it knows and would write only that back:
+    // what the newer one added would be gone. So it may not write until the phone has the newer Kassa, which it
+    // saves by itself and starts the next time it opens. `app` says how new a Kassa's data is; the oldest send none.
+    const app = Number.isInteger(body.app) ? body.app : 0;
+    const need = Number((await db.prepare("SELECT value FROM config WHERE name = 'app'").first())?.value ?? 0);
+    if (app < need) return fail(426);
     const { meta } = await db.prepare('UPDATE vault SET data = ?, version = version + 1, at = ? WHERE id = 1 AND version = ?')
       .bind(body.data, now, body.base).run();
     if (!meta.changes) return fail(409);
+    if (app > need) await db.prepare("INSERT OR REPLACE INTO config (name, value) VALUES ('app', ?)").bind(String(app)).run();
     ctx.waitUntil(pingOthers(env, isText(body.me, 64) ? body.me : '', now)); // `me`: the sending phone's notification id
     return json({ version: body.base + 1 });
   }

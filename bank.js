@@ -23,10 +23,11 @@ export const START_CATS = [
   { id: 'salaris', name: 'Salaris', kind: 'in' },
   { id: 'inkomen', name: 'Overig inkomen', kind: 'in' },
   { id: 'overboeking', name: 'Overboeking', kind: 'none' },
+  { id: 'beleggen', name: 'Beleggen', kind: 'none' },
 ];
 const KINDS = ['out', 'in', 'none'];
 
-export const emptyBank = () => ({ accounts: [], txs: [], cats: START_CATS.map((cat) => ({ ...cat })), rules: {}, fixed: {}, since: '', planned: [], stocks: [] });
+export const emptyBank = () => ({ accounts: [], txs: [], cats: START_CATS.map((cat) => ({ ...cat })), rules: {}, fixed: {}, since: '', planned: [], trades: [] });
 
 // ---------- reading bank files ----------
 
@@ -326,9 +327,9 @@ export function hasGap(bank, account) {
 // What a rule remembers of a counterparty's name: lower case, without numbers (a shop's branch) and marks.
 export const ruleKey = (name) => name.toLowerCase().replace(/[^a-zà-ÿ]+/g, ' ').trim();
 
-// The broker the shares are held at, as a bank line names it: DEGIRO, whose bank is flatex.
-// shortcut: one broker by name, make it a category of its own when a second broker comes.
-const BROKER = /(^| )(flatex|flatexdegiro|degiro)( |$)/;
+// The broker, as a bank line names it: DEGIRO, whose bank is flatex. Only a name that starts with it: a line
+// without a counterparty carries its description as its name, and a description may just mention the broker.
+const BROKER = /^(stichting )?(flatex|flatexdegiro|degiro)( |$)/;
 
 // Counterparties sorted without a rule of the user's: the supermarket chains, the chains to eat at, the
 // subscriptions every household knows (streaming, phone and internet), the train and the bus (a trip paid with
@@ -339,7 +340,7 @@ const KNOWN = [
   [/^(ns groep|ns reizigers|nlov[a-z]*|ov chipkaart)( |$)/, 'auto'],
   [/^(spotify|netflix|disney plus|hbo max|help hbomax|videoland|amazon prime|youtube premium|apple com bill|openai|odido|youfone|kpn|vodafone|ziggo|simyo|lebara)( |$)/, 'abonnementen'],
   [/^wissel (nederland|nl)( |$)/, 'cadeaukaarten'],
-  [BROKER, 'overboeking'], // money put in is not spent
+  [BROKER, 'beleggen'],
 ];
 // a payment request from a person named like a shop ("Plus via Tikkie") is nobody's groceries
 const known = (key) => (key.includes('tikkie') ? undefined : KNOWN.find(([pattern]) => pattern.test(key))?.[1]);
@@ -680,15 +681,44 @@ export function plannedOpen(bank, today) {
 }
 
 // ---------- investing ----------
-// Shares held at the broker: bank.stocks = [{ id, name, qty }], where `id` is the ticker the price feed knows the
-// share by (worker/quotes.js) and `qty` how many are held. The user keeps this list; the bank lines say what was put in.
+// What was put in at the broker is the category Beleggen: the bank lines that went there, less what came back. A line
+// to the broker lands in it by itself (KNOWN); any other line the user sorts into it or out of it. What was bought
+// with the money the user enters: bank.trades = [{ id, stock, name, date, qty, cents }], where `stock` is the ticker
+// the price feed knows the fund by (worker/quotes.js), `qty` how many were bought and `cents` what that cost with
+// the costs of the order. A sale has both below zero: what was sold, and what it brought in.
 
-// What went from the accounts to the broker, less what came back, in cents.
-export const invested = (bank) => bank.txs.reduce((sum, tx) => sum - (BROKER.test(ruleKey(tx.name)) ? tx.cents : 0), 0);
+// The bank lines that count as put in, the newest first
+export function deposits(bank) {
+  const catOf = sorter(bank);
+  return bank.txs.filter((tx) => catOf(tx) === 'beleggen').sort((a, b) => b.date.localeCompare(a.date));
+}
 
-// What the shares are worth in cents at `prices` (id -> euros for one); null while a share has no price.
-export const stocksWorth = (bank, prices) => bank.stocks.reduce((sum, stock) =>
-  (sum === null || !(prices[stock.id] > 0) ? null : sum + Math.round(stock.qty * prices[stock.id] * 100)), 0);
+// The lines to or from the broker that are sorted as something else, and so do not count. A transfer between own
+// accounts that only mentions the broker is not one of them.
+export function strayDeposits(bank) {
+  const catOf = sorter(bank);
+  const own = new Set(bank.accounts.map((account) => account.id));
+  return bank.txs.filter((tx) => BROKER.test(ruleKey(tx.name)) && catOf(tx) !== 'beleggen' && !tx.own && !own.has(tx.iban));
+}
+
+// What `lines` put in, in cents: money to the broker counts up, money back counts down.
+export const invested = (lines) => lines.reduce((sum, tx) => sum - tx.cents, 0);
+
+// What all purchases cost, less what the sales brought in. What was put in less this is the cash at the broker.
+// shortcut: costs outside an order (the yearly fee of an exchange) and dividends are not known here, so the cash can
+// drift from the broker's; add an entry for costs and income when it does.
+export const bought = (bank) => bank.trades.reduce((sum, trade) => sum + trade.cents, 0);
+
+// The funds held: [{ stock, name, qty, cents: what they cost on balance }], the one that cost most first.
+// A fund that was sold whole is not held; what it made or lost is in the cash.
+export function holdings(bank) {
+  const funds = new Map();
+  for (const { stock, name, qty, cents } of bank.trades) {
+    const fund = funds.get(stock) ?? { stock, name, qty: 0, cents: 0 };
+    funds.set(stock, { ...fund, qty: fund.qty + qty, cents: fund.cents + cents });
+  }
+  return [...funds.values()].filter((fund) => fund.qty > 1e-9).sort((a, b) => b.cents - a.cents);
+}
 
 // ---------- balances ----------
 
@@ -742,8 +772,10 @@ const isSaved = (account) => isAccount(account) && (account.through === '' || is
 const isCat = (cat) => isId(cat?.id) && isName(cat.name) && KINDS.includes(cat.kind)
   && (cat.budget === undefined || (Number.isInteger(cat.budget) && cat.budget > 0));
 const isPlan = (plan) => isId(plan?.id) && isName(plan.name) && Number.isInteger(plan.cents) && plan.cents > 0 && isDate(plan.date) && isDate(plan.since);
-export const isStock = (stock) => typeof stock?.id === 'string' && /^[\w.=^-]{1,20}$/.test(stock.id)
-  && isText(stock.name, 60) && stock.name.length > 0 && Number.isFinite(stock.qty) && stock.qty > 0 && stock.qty <= 1e9;
+export const isTrade = (trade) => isId(trade?.id) && typeof trade.stock === 'string' && /^[\w.=^-]{1,20}$/.test(trade.stock)
+  && isText(trade.name, 60) && trade.name.length > 0 && isDate(trade.date)
+  && Number.isFinite(trade.qty) && trade.qty !== 0 && Math.abs(trade.qty) <= 1e9
+  && Number.isInteger(trade.cents) && Math.abs(trade.cents) <= 1e11 && trade.qty * trade.cents >= 0; // bought and paid, or sold and received
 const isRules = (rules, isValue) => typeof rules === 'object' && rules !== null && !Array.isArray(rules)
   && Object.entries(rules).every(([key, value]) => isText(key, 60) && key.length > 0 && isValue(value));
 
@@ -756,7 +788,7 @@ export function parseBank(data) {
     && isRules(data.rules, isId) && isRules(data.fixed, (value) => typeof value === 'boolean')
     && (data.since === '' || isDate(data.since))
     && (data.planned === undefined || (Array.isArray(data.planned) && data.planned.every(isPlan))) // data saved before there were plans has none
-    && (data.stocks === undefined || (Array.isArray(data.stocks) && data.stocks.every(isStock))); // nor shares
+    && (data.trades === undefined || (Array.isArray(data.trades) && data.trades.every(isTrade))); // nor purchases
   if (!ok) throw new Error('invalid bank data');
   return {
     accounts: data.accounts.map(({ id, name, bank, balance, holder, card, through, uploaded, shop, monthly = [] }) => ({
@@ -769,10 +801,13 @@ export function parseBank(data) {
       ...(shares && { shares: shares.map(({ who, cents: part }) => ({ who, cents: part })) }),
       ...(gift && { gift: { shop: gift.shop, value: gift.value } }),
     })),
-    cats: data.cats.map(({ id, name, kind, budget }) => ({ id, name, kind, ...(budget && { budget }) })),
+    // data saved before there was investing has no category for it
+    cats: [...data.cats, ...START_CATS.filter((cat) => cat.id === 'beleggen' && !data.cats.some((each) => each.id === cat.id))]
+      .map(({ id, name, kind, budget }) => ({ id, name, kind, ...(budget && { budget }) })),
     rules: { ...data.rules }, fixed: { ...data.fixed }, since: data.since,
     planned: (data.planned ?? []).map(({ id, name, cents, date, since }) => ({ id, name, cents, date, since })),
-    stocks: (data.stocks ?? []).map(({ id, name, qty }) => ({ id, name, qty })),
+    // (for one day, 23 November 2026, there was a list `stocks` of funds without what they cost: it is not read any more)
+    trades: (data.trades ?? []).map(({ id, stock, name, date, qty, cents }) => ({ id, stock, name, date, qty, cents })),
   };
 }
 
