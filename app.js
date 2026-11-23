@@ -711,8 +711,8 @@ function txRow(tx, catOf, { category = true, account = true, toFill } = {}) {
     : toFill?.has(tx.id) ? `<span class="todo">${L('winkel invullen', 'fill in the shop')}</span>` : '';
   return `
     <li><button class="row tx" data-action="tx" data-id="${esc(tx.id)}">
-      <span class="row-main">${esc(tx.name)} <small>${dayShort(tx.date)}${
-        category ? ` · <span${cat ? '' : ' class="todo"'}>${catName(cat)}</span>` : ''}${
+      <span class="row-main">${esc(tx.name)} <small>${dayShort(tx.date)}${tx.early ? ` · ${L('voorlopig', 'provisional')}` : ''}${
+        category ?` · <span${cat ? '' : ' class="todo"'}>${catName(cat)}</span>` : ''}${
         others.length ? ` · ${L('ook voor', 'also for')} ${others.join(', ')}` : ''}${gift ? ` · ${gift}` : ''}${
         account ? ` · ${esc(nameOf(accountById(tx.acc)))}` : ''}</small></span>
       <span class="amount${tx.cents > 0 ? ' plus' : ''}">${signed(tx.cents)}</span>
@@ -2161,7 +2161,9 @@ async function askTx(tx) {
   $('txFacts').innerHTML = `
     <p class="row"><span class="row-main">${esc(tx.name)} <small>${formatDate(tx.date, 'UTC')} · ${esc(nameOf(accountById(tx.acc)))}</small></span>
       <span class="amount${tx.cents > 0 ? ' plus' : ''}">${signed(tx.cents)}</span></p>
-    ${tx.text ? `<p class="row"><small class="row-main selectable">${esc(tx.text)}</small></p>` : ''}`;
+    ${tx.text ? `<p class="row"><small class="row-main selectable">${esc(tx.text)}</small></p>` : ''}
+    ${tx.early ? `<p class="row"><small class="row-main">${L('Voorlopig: geboekt, maar de bank kan dit nog aanpassen. Kassa kijkt er bij het volgende ophalen opnieuw naar.',
+    'Provisional: booked, but the bank can still change it. Kassa looks at it again at the next fetch.')}</small></p>` : ''}`;
   const choice = (id, name) => `
     <label class="row choice"><input type="radio" name="cat" value="${id}"${id === before ? ' checked' : ''}>
       <span class="row-main">${name}</span>${icon('check')}</label>`;
