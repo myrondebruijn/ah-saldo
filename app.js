@@ -38,7 +38,7 @@ const SPAN = { week: 8, month: 6, year: 4 }; // how many periods the chart shows
 const STALE = 30; // days after which the overview asks for new bank files
 // Raise by one when the saved data gains something an older Kassa would drop while saving: the server then lets an
 // older Kassa read but not write (worker/index.js, PUT /vault), until that phone has the new one.
-const DATA = 1;
+const DATA = 2; // 2: the phones keep no copy; an older Kassa, which syncs a copy it keeps, may not write any more
 const START_IDS = new Set(START_CATS.map((cat) => cat.id));
 const KIND_ORDER = ['out', 'in', 'none'];
 
@@ -67,14 +67,19 @@ function load() {
   }
 }
 
+// Without sharing the phone keeps the data; with sharing the server holds the only copy (see sync).
+function store(key, value) {
+  if (!sharing) localStorage.setItem(key, JSON.stringify(value));
+}
+
 function save() {
   try {
-    localStorage.setItem(KEY, JSON.stringify(state));
+    store(KEY, state);
   } catch {
     toast(L('Opslaan is mislukt. Maak nu een back-up.', 'Saving failed. Make a backup now.'));
   }
   render();
-  syncSoon();
+  sync();
 }
 
 function loadBank() {
@@ -92,28 +97,31 @@ function loadBank() {
 
 function saveBank() {
   try {
-    localStorage.setItem(BANK_KEY, JSON.stringify(bank));
+    store(BANK_KEY, bank);
   } catch {
     toast(L('Opslaan is mislukt: de opslag van de telefoon is vol.', 'Saving failed: the storage of the phone is full.'));
   }
   render();
-  syncSoon();
+  sync();
   reportMonth();
 }
 
 // ---------- sharing ----------
-// With sharing on, the cards and bank data are also on the Kassa server, locked (see sync.js), and every phone
-// keeps its own full copy, as a shop may have no signal. Changes go up a moment after they are saved; the other
-// phone fetches them when Kassa opens or comes back to the front, and every ten seconds while it is on screen.
+// With sharing on, the cards and bank data are on the Kassa server only, locked (see sync.js): the phone keeps no
+// copy, as a copy an older Kassa had read once wiped what the other phone entered (23 November 2026). Kassa fetches
+// everything when it opens, when it comes back to the front and every ten seconds while it is on screen; every change
+// goes to the server at once, and one the server did not take is undone on the screen too.
 
-const SHARE_KEY = `${KEY}-sync`; // { key: the household key, cred: this phone's passkey, version: of the data last synced }
-const BASE_KEY = `${KEY}-sync-base`; // the data as it was after the last sync: what changed on both sides since is joined
+const SHARE_KEY = `${KEY}-sync`; // { key: the household key, cred: this phone's passkey, version: of the data on screen }
 let sharing = readSharing();
+if (sharing) sharing.version = 0; // nothing is kept on the phone: fetch it all
 let household = sharing && fromB64u(sharing.key);
+let onServer = null; // the data as the server has it (canonical JSON), null until it is in
 let syncing = false;
 let syncAgain = false;
 let syncError = null;
-let syncTimer;
+// the copies an earlier Kassa kept on the phone
+const forgetLocal = () => [KEY, BANK_KEY, `${KEY}-sync-base`].forEach((key) => localStorage.removeItem(key));
 
 function readSharing() {
   try {
@@ -131,28 +139,20 @@ const snapshot = () => JSON.stringify(canonical({ state, bank }));
 
 function keepSharing(base) {
   localStorage.setItem(SHARE_KEY, JSON.stringify(sharing));
-  localStorage.setItem(BASE_KEY, base);
+  onServer = base;
 }
 
-// Puts `data` (canonical) in the app in place of what was there, and saves it on this phone.
+// Puts `data` (canonical) in the app in place of what was there.
 function takeData(data) {
   ({ state, bank } = data);
-  localStorage.setItem(KEY, JSON.stringify(state));
-  localStorage.setItem(BANK_KEY, JSON.stringify(bank));
 }
 
 // A sheet is open or a field has the keyboard: replacing the data now would undo what is being entered.
 const busy = () => Boolean(document.querySelector('dialog[open]'))
   || (app.contains(document.activeElement) && document.activeElement.matches('input, select, textarea'));
 
-function syncSoon() {
-  if (!sharing) return;
-  clearTimeout(syncTimer);
-  syncTimer = setTimeout(sync, 1500);
-}
-
-// Brings this phone and the server level: fetches what is new there, joins it with what changed here, and sends
-// the result. One run at a time; a call during a run makes it run once more.
+// Brings the screen and the server level: fetches what is new there, joins it with the change just made here (when
+// the other phone saved in the same moment), and sends that. One run at a time; a call during a run makes it run once more.
 async function sync(tries = 3) {
   if (!sharing) return;
   if (syncing) {
@@ -170,14 +170,15 @@ async function sync(tries = 3) {
       if (busy()) return; // the next round tries again
       const theirs = canonical(JSON.parse(await openData(household, remote.data)));
       const mine = snapshot();
-      const base = localStorage.getItem(BASE_KEY);
-      takeData(mine === base ? theirs : canonical(merge(JSON.parse(base), JSON.parse(mine), theirs)));
+      const first = !onServer;
+      takeData(first || mine === onServer ? theirs : canonical(merge(JSON.parse(onServer), JSON.parse(mine), theirs)));
       sharing.version = remote.version;
       keepSharing(JSON.stringify(theirs));
+      if (first) catchUp(bank, isoDate()); // the bookings of the shop balances since the last opening; they go up below
       changed = true;
     }
     const now = snapshot();
-    if (now !== localStorage.getItem(BASE_KEY)) {
+    if (onServer && now !== onServer) { // never before the data is in: an empty app would replace it
       const me = localStorage.getItem(PUSH_KEY) ?? undefined; // so the server does not tell this phone what it changed itself
       const sent = await api('PUT', '/vault', { token, body: { base: sharing.version, data: await sealData(household, now), me, app: DATA } })
         .catch((error) => {
@@ -192,11 +193,18 @@ async function sync(tries = 3) {
     syncError = null;
   } catch (error) {
     syncError = error;
+    if (onServer && snapshot() !== onServer) { // not on the server, so not kept: the screen shows what is there
+      takeData(JSON.parse(onServer));
+      changed = true;
+      toast(error.status === 426 ? L('Niet opgeslagen: deze Kassa is verouderd. Sluit Kassa en open hem opnieuw.', 'Not saved: this Kassa is out of date. Close Kassa and open it again.')
+        : error.status === 401 ? L('Niet opgeslagen: deze telefoon wordt niet meer toegelaten.', 'Not saved: this phone is no longer let in.')
+          : L('Niet opgeslagen: geen verbinding met de Kassa-server. Probeer het opnieuw als je verbinding hebt.', 'Not saved: no connection with the Kassa server. Try again once you have a connection.'));
+    }
   } finally {
     syncing = false;
   }
   // the settings screen says whether the server is reachable; redrawing it every round would close its date picker
-  if (changed || (route() === 'meer' && failed !== Boolean(syncError))) render();
+  if (changed || ((route() === 'meer' || !onServer) && failed !== Boolean(syncError))) render();
   if (syncAgain && tries > 1) await sync(tries - 1);
 }
 
@@ -205,6 +213,7 @@ function link(key, cred, version) {
   household = key;
   sharing = { key: b64u(key), cred, version };
   keepSharing(snapshot());
+  forgetLocal();
   syncError = null;
   render();
 }
@@ -330,7 +339,7 @@ const keepLinks = () => localStorage.setItem(LINKS_KEY, JSON.stringify(links));
 // `asked`: the Fetch now button, which does not wait for the hour and says how it went
 async function fetchBank(asked = false) {
   const announced = await globalThis.caches?.delete('kassa-news'); // a notification came in since (sw.js): don't wait for the hour
-  if (!sharing || (!asked && !announced && Date.now() - (links.at ?? 0) < HOUR)) return;
+  if (!sharing || !onServer || (!asked && !announced && Date.now() - (links.at ?? 0) < HOUR)) return;
   links.at = Date.now(); // a failed try waits an hour too
   keepLinks();
   if (asked) toast(L('Ophalen bij de bank…', 'Fetching from the bank…'));
@@ -1785,8 +1794,8 @@ function shareSection() {
   }
   const status = syncing ? L('Bijwerken…', 'Updating…')
     : syncError?.status === 401 ? L('Deze telefoon wordt niet meer toegelaten.', 'This phone is no longer let in.')
-      : syncError ? L('Nog niet bijgewerkt: geen verbinding met de Kassa-server. Wat je wijzigt, gaat mee zodra die er is.',
-        'Not updated yet: no connection with the Kassa server. What you change goes along as soon as there is one.')
+      : syncError ? L('Geen verbinding met de Kassa-server: wat je nu wijzigt, wordt niet bewaard.',
+        'No connection with the Kassa server: what you change now is not saved.')
         : L('Alles is bijgewerkt.', 'Everything is up to date.');
   return `
     <h2 class="section">${L('Samen delen', 'Sharing')}</h2>
@@ -1794,7 +1803,8 @@ function shareSection() {
       <button class="row tint" data-action="invite">${L('Iemand uitnodigen', 'Invite someone')}</button>
       <button class="row tint" data-action="syncNow">${L('Nu bijwerken', 'Update now')}</button>
     </div>
-    <p class="group-note" aria-live="polite">${status} ${L('Zolang Kassa open is, zie je binnen tien seconden wat de ander wijzigt.', 'While Kassa is open, you see what the other phone changes within ten seconds.')}</p>`;
+    <p class="group-note" aria-live="polite">${status} ${L('Alles staat op de Kassa-server, niet op deze telefoon: elke wijziging gaat er meteen heen. Zolang Kassa open is, zie je binnen tien seconden wat de ander wijzigt.',
+      'Everything is on the Kassa server, not on this phone: every change goes there at once. While Kassa is open, you see what the other phone changes within ten seconds.')}</p>`;
 }
 
 // Only with sharing on: the server lets in only phones of the household.
@@ -1958,6 +1968,17 @@ function archiveScreen() {
       ${spent.length ? `<ul class="group">${rows}</ul>` : blank(L('Geen lege kaarten', 'No empty cards'))}`,
   };
 }
+
+// With sharing on, the data comes from the server only: until it is in, there is nothing to show.
+const waitScreen = () => ({
+  html: `
+    <section class="install">
+      <img src="icon-180.png" alt="" width="88" height="88">
+      <h1>${syncError ? L('Geen verbinding met de Kassa-server', 'No connection with the Kassa server') : L('Gegevens ophalen…', 'Fetching your data…')}</h1>
+      ${syncError ? `<p>${L('Je gegevens staan veilig op de server. Kassa probeert het elke tien seconden opnieuw.', 'Your data is safe on the server. Kassa tries again every ten seconds.')}</p>
+      <div class="group"><button class="row tint" data-action="syncNow">${L('Nu opnieuw proberen', 'Try again now')}</button></div>` : ''}
+    </section>`,
+});
 
 const installScreen = () => ({
   html: `
@@ -2202,6 +2223,7 @@ function render() {
   const install = needsInstall(navigator.userAgent, standalone);
   tab = TAB_OF[route()] ?? tab;
   const screen = install ? installScreen()
+    : sharing && !onServer ? waitScreen()
     : card ? cardScreen(card)
     : atTill ? payScreen()
     : purchase ? purchaseScreen(purchase)
@@ -2694,7 +2716,7 @@ async function importBankFiles() {
   if (changed) {
     catchUp(bank, isoDate());
     state.needsBackup = true;
-    localStorage.setItem(KEY, JSON.stringify(state));
+    store(KEY, state);
     saveBank();
   }
   const news = !changed ? '' : added ? L(`${plural(added, 'nieuwe transactie', 'nieuwe transacties')} toegevoegd.`, `${plural(added, 'new transaction', 'new transactions')} added.`)
@@ -2824,7 +2846,7 @@ async function importBackup() {
   if (!sure) return;
   state = { ...next, needsBackup: false };
   if (nextBank) bank = nextBank;
-  localStorage.setItem(KEY, JSON.stringify(state));
+  store(KEY, state);
   saveBank();
   go('#/');
 }
@@ -3167,6 +3189,7 @@ navigator.serviceWorker?.register('sw.js');
 if (navigator.serviceWorker?.controller) {
   navigator.serviceWorker.addEventListener('controllerchange', () => busy() || ['betalen', 'kaart'].includes(route()) || location.reload());
 }
+if (sharing) forgetLocal();
 state = load();
 bank = loadBank();
 if (catchUp(bank, isoDate()).length) saveBank();
@@ -3186,4 +3209,5 @@ document.addEventListener('visibilitychange', () => {
   fetchQuotes();
 });
 addEventListener('online', () => sync());
+document.addEventListener('close', () => sync(), true); // a change that waited for a sheet to close goes up now
 setInterval(() => document.hidden || (sync(), fetchBank(), fetchQuotes()), 10_000); // while Kassa is on screen: the other phone's changes show up within seconds
