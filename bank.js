@@ -815,16 +815,17 @@ export function parseBank(data) {
 // were read already (`files`, each as a reader returns it, read at the moment `at`), and categories, rules,
 // choices, names and gift cards: { files, at, cats, rules, fixed, since, names: account id -> name,
 // choices: transaction id -> category id, gifts: transaction id -> { shop, value },
-// balances: [{ shop, balance, through, monthly }] } - a shop's balance the app keeps already is left alone.
-// Returns how many transactions were new, or null, changing nothing, when the file is not that.
+// balances: [{ shop, balance, through, monthly }], trades: purchases and sales at the broker } - a shop's balance the
+// app keeps already is left alone, and so is a purchase it has (the same id).
+// Returns how many transactions and purchases were new, or null, changing nothing, when the file is not that.
 export function addStarter(bank, starter, now) {
-  const { files = [], at = now, cats = [], rules = {}, fixed = {}, since = '', names = {}, choices = {}, gifts = {}, balances = [] } = starter ?? {};
+  const { files = [], at = now, cats = [], rules = {}, fixed = {}, since = '', names = {}, choices = {}, gifts = {}, balances = [], trades = [] } = starter ?? {};
   const ok = starter?.kind === 'kassa-start' && Array.isArray(cats) && cats.every(isCat)
     && isRules(rules, isId) && isRules(fixed, (value) => typeof value === 'boolean') && (since === '' || isDate(since))
     && typeof names === 'object' && Object.values(names).every(isName)
     && typeof choices === 'object' && Object.values(choices).every(isId)
     && typeof gifts === 'object' && gifts !== null && Object.values(gifts).every(isGift)
-    && Array.isArray(balances) && balances.every(isBalance)
+    && Array.isArray(balances) && balances.every(isBalance) && Array.isArray(trades) && trades.every(isTrade)
     && Array.isArray(files) && files.every((file) => Array.isArray(file?.accounts) && file.accounts.every(isAccount)
       && Array.isArray(file.txs) && file.txs.every(isTx))
     && (files.length === 0 || (typeof at === 'string' && !Number.isNaN(Date.parse(at))));
@@ -844,5 +845,7 @@ export function addStarter(bank, starter, now) {
     if (gifts[tx.id] && tx.cents < 0) tx.gift = { shop: gifts[tx.id].shop, value: gifts[tx.id].value };
   }
   for (const each of balances) addBalance(bank, each, now);
-  return added;
+  const bought = trades.filter((trade) => !bank.trades.some((each) => each.id === trade.id));
+  bank.trades.push(...bought.map(({ id, stock, name, date, qty, cents }) => ({ id, stock, name, date, qty, cents })));
+  return added + bought.length;
 }

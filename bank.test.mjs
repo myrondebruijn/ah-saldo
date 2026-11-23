@@ -579,6 +579,11 @@ test('a starter file adds categories, rules, names and choices, or nothing at al
   assert.deepEqual(data.accounts.filter((account) => account.shop).map((account) => [account.shop, account.balance, account.monthly.length]), [['Boekenbon', 1200, 1]]);
   assert.equal(bank.addStarter(data, { kind: 'kassa-start', balances: [{ shop: 'Boekenbon', balance: 'veel', through: '2026-07-01' }] }, NOW), null);
   assert.equal(data.cats.length, bank.START_CATS.length + 1);
+  const purchase = { kind: 'kassa-start', trades: [{ id: 'koop-1', stock: 'VWCE.DE', name: 'Vanguard FTSE All-World', date: '2026-11-23', qty: 3, cents: 48034 }] };
+  assert.equal(bank.addStarter(data, purchase, NOW), 1);
+  assert.equal(bank.addStarter(data, purchase, NOW), 0); // twice adds it once
+  assert.deepEqual(data.trades, purchase.trades);
+  assert.equal(bank.addStarter(data, { kind: 'kassa-start', trades: [{ ...purchase.trades[0], id: 'koop-2', qty: 0 }] }, NOW), null);
   assert.equal(data.cats.find((cat) => cat.id === 'fun').budget, 40000);
   assert.deepEqual([data.since, data.accounts[0].name, data.txs[4].cat, data.rules['voorbeeld b v']], ['2026-06-01', 'Betaalrekening', 'sport', 'salaris']);
   assert.doesNotThrow(() => bank.parseBank(JSON.parse(JSON.stringify(data))));
