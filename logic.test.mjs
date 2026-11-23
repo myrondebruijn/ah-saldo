@@ -152,7 +152,13 @@ test('parseState keeps purchases and the card entries that belong to them', () =
   const linked = card({ entries: [entry('start', 2500), { ...entry('pay', -1200), purchase: 'p1' }] });
   const parsed = logic.parseState(JSON.stringify({ cards: [linked], purchases: [{ ...bought, extra: 1 }] }));
   assert.deepEqual(parsed, { cards: [linked], purchases: [bought], needsBackup: false });
+  // a card knows the payment that bought it, a purchase the bank line of its pin part, or that it is still to come
+  const tied = { cards: [{ ...linked, tx: 'NL00TEST0123456789.17' }], purchases: [{ ...bought, tx: 'NL00TEST0123456789.18' }, { ...bought, id: 'p2', wait: true }] };
+  assert.deepEqual(logic.parseState(JSON.stringify(tied)), { ...tied, needsBackup: false });
+  assert.throws(() => logic.parseState(JSON.stringify({ cards: [{ ...linked, tx: '<b>' }] })));
   const bad = [
+    { ...bought, tx: 'a b' },
+    { ...bought, wait: 'yes' },
     { ...bought, total: 4100 }, // shares no longer add up
     { ...bought, cards: 5000 }, // more from cards than the total
     { ...bought, store: '' },

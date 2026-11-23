@@ -143,6 +143,7 @@ export function code128(digits) {
 export const needsInstall = (userAgent, standalone) => /iPhone|iPad|iPod/.test(userAgent) && !standalone;
 
 const isId = (id) => typeof id === 'string' && /^[\w-]{1,64}$/.test(id);
+const isLine = (id) => id === undefined || (typeof id === 'string' && /^[\w.-]{1,120}$/.test(id)); // a bank transaction's id, when there is one
 const isTime = (text) => typeof text === 'string' && !Number.isNaN(Date.parse(text));
 const isEntry = (entry) => isId(entry?.id) && isTime(entry.at) && KINDS.includes(entry.kind) && Number.isInteger(entry.delta)
   && (entry.purchase === undefined || isId(entry.purchase));
@@ -153,27 +154,30 @@ const isPurchase = (purchase) => isId(purchase?.id) && isTime(purchase.at) && is
   && Number.isInteger(purchase.cards) && purchase.cards >= 0 && purchase.cards <= purchase.total
   && Array.isArray(purchase.shares) && purchase.shares.length > 0
   && purchase.shares.every((share) => isName(share?.who) && Number.isInteger(share.cents) && share.cents > 0)
-  && purchase.shares.reduce((sum, share) => sum + share.cents, 0) === purchase.total;
+  && purchase.shares.reduce((sum, share) => sum + share.cents, 0) === purchase.total
+  && isLine(purchase.tx) && (purchase.wait === undefined || purchase.wait === true);
 
 // Reads saved data or a backup file. Throws on anything that is not exactly our shape,
 // because the result is rendered as HTML and holds the card codes.
+// A card may name the bank payment that bought it (`tx`). A purchase may name the bank line of the part that
+// went by pin (`tx`), or say that this line is still to come (`wait`): bank.js, tie.
 export function parseState(json) {
   const data = JSON.parse(json);
   if (!Array.isArray(data?.cards)) throw new Error('no cards');
   const cards = data.cards.map((card) => {
     const ok = isId(card?.id) && validNumber(card.number) && validCode(card.code)
-      && (card.expiry === '' || isDate(card.expiry))
+      && (card.expiry === '' || isDate(card.expiry)) && isLine(card.tx)
       && Array.isArray(card.entries) && card.entries.every(isEntry);
     if (!ok) throw new Error('invalid card');
     return {
-      id: card.id, number: card.number, code: card.code, expiry: card.expiry,
+      id: card.id, number: card.number, code: card.code, expiry: card.expiry, ...(card.tx && { tx: card.tx }),
       entries: card.entries.map(({ id, at, kind, delta, purchase }) => ({ id, at, kind, delta, ...(purchase && { purchase }) })),
     };
   });
   const listed = data.purchases ?? []; // data from before purchases existed has none
   if (!Array.isArray(listed) || !listed.every(isPurchase)) throw new Error('invalid purchase');
-  const purchases = listed.map(({ id, at, store, total, cards: fromCards, shares }) => ({
-    id, at, store, total, cards: fromCards, shares: shares.map(({ who, cents }) => ({ who, cents })),
+  const purchases = listed.map(({ id, at, store, total, cards: fromCards, shares, tx, wait }) => ({
+    id, at, store, total, cards: fromCards, ...(tx && { tx }), ...(wait && { wait }), shares: shares.map(({ who, cents }) => ({ who, cents })),
   }));
   return { cards, purchases, needsBackup: data.needsBackup === true };
 }

@@ -441,6 +441,79 @@ test('groceries split between people: the household keeps its part, the rest is 
   bad([]);
 });
 
+// a payment at the AH till at noon on a day of July 2026: what the cards paid, and the total as far as it is known
+const till = (id, day, cards, over = {}) => ({
+  id, at: new Date(2026, 6, day, 12).toISOString(), store: 'AH', total: cards, cards, shares: [{ who: 'Wij', cents: cards }], ...over,
+});
+const ahLine = (id, date, cents, over = {}) => tx({ id, date, cents, name: 'Albert Heijn 1234', ...over });
+
+test('tie: a till payment that waits for its pin part takes the first AH line from that day on, and grows by it', () => {
+  const data = withTxs(
+    ahLine('before', '2026-07-09', -700), // the day before: another visit
+    tx({ id: 'jumbo', date: '2026-07-10', cents: -900, name: 'Jumbo Dorp' }),
+    ahLine('pin', '2026-07-10', -501),
+    ahLine('next', '2026-07-11', -2000),
+  );
+  const state = { cards: [], purchases: [till('p', 10, 12500, { wait: true })] };
+  assert.equal(bank.tie(data, state), 1);
+  assert.deepEqual(state.purchases[0], { ...till('p', 10, 12500), total: 13001, tx: 'pin', shares: [{ who: 'Wij', cents: 13001 }] });
+  assert.equal(bank.tie(data, state), 0); // tied once
+  // the cards' worth counts as the purchase, the pin part as the bank line: together what was bought, once
+  assert.equal(bank.figures(data, state.purchases, '2026-07-10', '2026-07-11').byCat.get('boodschappen'), 900 + 13001);
+  // nothing from AH within three days: it keeps waiting
+  const late = { cards: [], purchases: [till('q', 5, 2500, { wait: true })] };
+  assert.equal(bank.tie(data, late), 0);
+  assert.equal(late.purchases[0].wait, true);
+  // two payments on one day each take a line of their own, in the order they were made
+  const two = { cards: [], purchases: [till('b', 10, 1000, { wait: true, at: new Date(2026, 6, 10, 15).toISOString() }), till('a', 10, 3000, { wait: true })] };
+  bank.tie(data, two);
+  assert.deepEqual(two.purchases.map((each) => [each.id, each.tx, each.total]), [['b', 'next', 3000], ['a', 'pin', 3501]]);
+});
+
+test('tie: a typed total takes the line of exactly the pin part, and a split follows the purchase', () => {
+  const data = withTxs(
+    ahLine('other', '2026-07-10', -1200),
+    ahLine('pin', '2026-07-11', -501, { shares: [{ who: 'Wij', cents: 301 }, { who: 'Oma', cents: 200 }] }),
+  );
+  const whole = { cards: [], purchases: [till('p', 10, 12500, { total: 13001, shares: [{ who: 'Wij', cents: 13001 }] })] };
+  assert.equal(bank.tie(data, whole), 1);
+  assert.equal(whole.purchases[0].tx, 'pin');
+  assert.deepEqual(whole.purchases[0].shares, [{ who: 'Wij', cents: 12801 }, { who: 'Oma', cents: 200 }]); // the line was split before: that goes along
+  // a purchase split by hand keeps its split; what is for someone else comes out of the card part first, the rest out of the line
+  const split = { cards: [], purchases: [till('p', 10, 300, { total: 801, shares: [{ who: 'Oma', cents: 500 }, { who: 'Wij', cents: 301 }] })] };
+  bank.tie(data, split);
+  assert.deepEqual(split.purchases[0].shares, [{ who: 'Oma', cents: 500 }, { who: 'Wij', cents: 301 }]);
+  const sum = bank.figures(data, split.purchases, '2026-07-01', '2026-08-01');
+  assert.deepEqual([sum.byCat.get('boodschappen'), sum.byCat.get('anderen'), sum.spending], [1200 + 301, 500, 1200 + 801]);
+  assert.deepEqual(bank.forWhom(data, split.purchases, '2026-07-01', '2026-08-01'), [['Wij', 1501], ['Oma', 500]]);
+  // nothing fits: no tie, and a line that is no groceries is never taken
+  assert.equal(bank.tie(data, { cards: [], purchases: [till('p', 10, 300, { total: 999, shares: [{ who: 'Wij', cents: 999 }] })] }), 0);
+  data.txs[1].cat = 'uiteten';
+  assert.equal(bank.tie(data, { cards: [], purchases: [till('p', 10, 12500, { wait: true })] }), 1); // the first AH line that is groceries
+  // the line is gone: the tie comes off, and the total stays what it was
+  const gone = { cards: [], purchases: [till('p', 10, 300, { total: 801, tx: 'nowhere', shares: [{ who: 'Wij', cents: 801 }] })] };
+  assert.equal(bank.tie(bank.emptyBank(), gone), 1);
+  assert.deepEqual([gone.purchases[0].tx, gone.purchases[0].total], [undefined, 801]);
+});
+
+test('tie: a card goes to the gift card payment that bought it, and a payment without a card asks for one', () => {
+  const wissel = (id, date, cents, value, shop = 'Albert Heijn') => tx({ id, date, cents, name: 'Wissel Nederland B.V.', gift: { shop, value } });
+  const card = (id, value, at, over = {}) => ({ id, number: '1'.repeat(19), code: '123456', expiry: '', entries: [{ id: 's', at, kind: 'start', delta: value }], ...over });
+  const data = withTxs(wissel('w1', '2026-07-10', -9850, 10000), wissel('w2', '2026-07-10', -2463, 2500), wissel('w3', '2026-07-10', -4700, 5000, 'Boekenbon'));
+  const state = { purchases: [], cards: [
+    card('old', 10000, '2026-07-01T10:00:00.000Z'), // in the app before the payment: another card
+    card('a', 10000, '2026-07-09T10:00:00.000Z'), // added the evening before the bank booked it
+    card('used', 2500, '2026-07-10T10:00:00.000Z', { tx: 'w0' }), // belongs to another payment already
+  ] };
+  assert.deepEqual(bank.cardsToAdd(data, state.cards, '2026-07-12').map((each) => each.id), ['w2', 'w1']);
+  assert.equal(bank.tie(data, state), 1);
+  assert.deepEqual(state.cards.map((each) => each.tx), [undefined, 'w1', 'w0']);
+  assert.deepEqual(bank.cardsToAdd(data, state.cards, '2026-07-12').map((each) => each.id), ['w2']); // the card of 25,00 is still to add
+  assert.deepEqual(bank.cardsToAdd(data, state.cards, '2026-08-10'), []); // a month on, the app stops asking
+  data.txs[1].cat = 'anderen'; // a card for someone else: sorted elsewhere, so no card to add
+  assert.deepEqual(bank.cardsToAdd(data, state.cards, '2026-07-12'), []);
+});
+
 test('inCategory and byParty list what is behind a figure', () => {
   const data = loaded();
   const open = bank.inCategory(data, '', '2026-06-01', '2026-08-01');

@@ -386,6 +386,17 @@ function cardParts(purchase) {
   return [['boodschappen', purchase.cards - others], ['anderen', others]];
 }
 
+// The bank line of a till payment's pin part (purchase.tx, see tie) is one purchase with it, so who that line was
+// for is the purchase's to say: bank line id -> what of each share for someone else the cards did not cover.
+const pinShares = (purchases) => new Map(purchases.filter((purchase) => purchase.tx).map((purchase) => {
+  let left = purchase.cards;
+  return [purchase.tx, purchase.shares.filter((share) => share.who !== US).map((share) => {
+    const fromCards = Math.min(left, share.cents);
+    left -= fromCards;
+    return { who: share.who, cents: share.cents - fromCards };
+  })];
+}));
+
 // What came in and went out from `from` up to (not including) `to`, never earlier than bank.since:
 // income, spending, how many transactions are not sorted yet, and `byCat`: category id -> cents
 // (spent for a spending category, received for an income one; '' holds what is not sorted yet).
@@ -397,6 +408,7 @@ export function figures(bank, purchases, from, to) {
   const kinds = new Map(bank.cats.map((cat) => [cat.id, cat.kind]));
   const start = from > bank.since ? from : bank.since;
   const held = heldShops(bank);
+  const tied = pinShares(purchases);
   const byCat = new Map();
   const moved = new Map();
   const result = { income: 0, spending: 0, open: 0, byCat, moved };
@@ -407,7 +419,7 @@ export function figures(bank, purchases, from, to) {
     const kind = !cat ? (tx.cents < 0 ? 'out' : 'in') : cat === 'cadeaukaarten' && held.has(tx.gift?.shop) ? 'none' : kinds.get(cat);
     if (!cat) result.open++;
     if (kind === 'out') {
-      const others = cat === 'boodschappen' ? forOthers(tx.shares) : 0;
+      const others = cat === 'boodschappen' ? forOthers(tied.get(tx.id) ?? tx.shares) : 0;
       result.spending -= tx.cents;
       add(cat, -tx.cents - others);
       if (others) add('anderen', others);
@@ -430,12 +442,14 @@ export function figures(bank, purchases, from, to) {
 export function forWhom(bank, purchases, from, to) {
   const catOf = sorter(bank);
   const start = from > bank.since ? from : bank.since;
+  const tied = pinShares(purchases);
   const sums = new Map();
   const add = (who, cents) => sums.set(who, (sums.get(who) ?? 0) + cents);
   for (const tx of bank.txs) {
     if (tx.date < start || tx.date >= to || catOf(tx) !== 'boodschappen') continue;
-    for (const share of tx.shares ?? []) if (share.who !== US) add(share.who, share.cents);
-    add(US, -tx.cents - forOthers(tx.shares));
+    const shares = tied.get(tx.id) ?? tx.shares ?? [];
+    for (const share of shares) if (share.who !== US) add(share.who, share.cents);
+    add(US, -tx.cents - forOthers(shares));
   }
   for (const purchase of purchases) {
     const date = isoDate(new Date(purchase.at));
@@ -527,6 +541,74 @@ export function giftGuesses(bank, paid) {
     return { shop, value: near ? round : Math.round(exact / 5) * 5, off: near ? Math.abs(exact - round) : 1e9 };
   }).sort((a, b) => a.off - b.off).map(({ shop, value }) => ({ shop, value }));
 }
+
+// ---------- what belongs together ----------
+// A payment at the AH till can be one purchase with a bank line, the part that went by pin: purchase.tx is that
+// line's id. And an AH card belongs to the payment that bought it: card.tx. tie() finds both by itself.
+
+const AH_LINE = /^((bck|ccv|sumup|zettle) )?(albert heijn|ah)( |$)/; // as a bank line names the shop (ruleKey)
+const dayAfter = (date, days) => new Date(Date.parse(date) + days * 864e5).toISOString().slice(0, 10);
+const cardPayments = (bank) => {
+  const catOf = sorter(bank);
+  return bank.txs.filter((tx) => tx.gift?.shop === AH && catOf(tx) === 'cadeaukaarten').sort(byDate);
+};
+// two splits as one, the largest first
+function joined(...shares) {
+  const sums = new Map();
+  for (const { who, cents } of shares.flat()) sums.set(who, (sums.get(who) ?? 0) + cents);
+  return [...sums].filter(([, cents]) => cents > 0).map(([who, cents]) => ({ who, cents })).sort((a, b) => b.cents - a.cents);
+}
+
+// Ties what is not tied yet and returns how many ties changed. `state` holds the cards and the till payments (logic.js).
+// - A till payment that waits for its pin part (purchase.wait) takes the first AH line from its day on, three days
+//   long (a bank can book later), and grows by it. One whose total was typed takes the line of exactly what the
+//   cards did not pay. Who the line was for goes with it, unless the purchase was split by hand already.
+// - A card without a payment goes to the AH gift card payment worth what the card started with, when the card came
+//   into the app no earlier than three days before the payment's date.
+// - A tie to a line that is gone (a provisional line the bank renumbered) is taken off.
+// shortcut: with two visits to AH on one day the first line can be the other visit's; untie it on the purchase and type the total.
+export function tie(bank, state) {
+  const catOf = sorter(bank);
+  const known = new Set(bank.txs.map((tx) => tx.id));
+  let changed = 0;
+  for (const purchase of state.purchases) {
+    if (!purchase.tx || known.has(purchase.tx)) continue;
+    delete purchase.tx;
+    changed++;
+  }
+  const taken = new Set(state.purchases.map((purchase) => purchase.tx));
+  const lines = bank.txs.filter((tx) => tx.cents < 0 && catOf(tx) === 'boodschappen' && AH_LINE.test(ruleKey(tx.name))).sort(byDate);
+  for (const purchase of [...state.purchases].sort((a, b) => a.at.localeCompare(b.at))) {
+    const pin = purchase.total - purchase.cards;
+    if (purchase.tx || purchase.store !== 'AH' || !(purchase.wait || pin)) continue;
+    const day = isoDate(new Date(purchase.at));
+    const line = lines.find((tx) => !taken.has(tx.id) && tx.date >= day && tx.date <= dayAfter(day, 3) && (purchase.wait || tx.cents === -pin));
+    if (!line) continue;
+    taken.add(line.id);
+    if (purchase.wait || purchase.shares.length === 1) {
+      const main = (purchase.shares.find((share) => share.who === US) ?? purchase.shares[0]).who;
+      purchase.shares = joined(purchase.wait ? purchase.shares : [{ who: main, cents: purchase.cards }], line.shares ?? [{ who: main, cents: -line.cents }]);
+    }
+    if (purchase.wait) purchase.total -= line.cents;
+    delete purchase.wait;
+    purchase.tx = line.id;
+    changed++;
+  }
+  for (const tx of cardPayments(bank)) {
+    if (state.cards.some((card) => card.tx === tx.id)) continue;
+    const card = state.cards.find(({ tx: tiedTo, entries: [start] }) => !tiedTo && start?.kind === 'start' && start.delta === tx.gift.value
+      && isoDate(new Date(start.at)) >= dayAfter(tx.date, -3));
+    if (!card) continue;
+    card.tx = tx.id;
+    changed++;
+  }
+  return changed;
+}
+
+// The AH gift card payments of the last thirty days that have no card in the app, the newest first. After that
+// the app stops asking: the card was used up some other way, or given away.
+export const cardsToAdd = (bank, cards, today) => cardPayments(bank)
+  .filter((tx) => tx.date >= dayAfter(today, -30) && !cards.some((card) => card.tx === tx.id)).reverse();
 
 // ---------- a shop's balance ----------
 // Gift cards for a shop other than AH can be kept as a balance too: an account with `shop`, whose `balance` is

@@ -49,6 +49,7 @@
         <h2 id="cardTitle"></h2>
         <button class="text-button strong" value="ok" data-en="Save">Opslaan</button>
       </header>
+      <p class="group-note" id="cardNote"></p>
       <div class="group">
         <label class="field"><span data-en="Card number">Kaartnummer</span>
           <input name="number" inputmode="numeric" autocomplete="off" placeholder="19 cijfers" data-en="19 digits">
@@ -284,6 +285,7 @@
       <div class="group">
         <p id="confirmText"></p>
         <button id="confirmOk" class="row danger" value="ok"></button>
+        <button type="button" id="confirmAlt" class="row tint" data-action="alt" hidden></button>
       </div>
       <button type="button" class="row" data-action="close" autofocus data-en="Cancel">Annuleren</button>
     </form>

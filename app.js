@@ -4,9 +4,9 @@ import {
   validCode, validNumber,
 } from './logic.js';
 import {
-  AH, LARGE, START_CATS, US, addBalance, addFile, addStarter, balanceOn, byParty, cardsOn, catchUp, decodeText, dayRate, dueOn, emptyBank, ended, figures, fixedCosts,
+  AH, LARGE, START_CATS, US, addBalance, addFile, addStarter, balanceOn, byParty, cardsOn, cardsToAdd, catchUp, decodeText, dayRate, dueOn, emptyBank, ended, figures, fixedCosts,
   fixedSuggestions, forWhom, giftGuesses, giftsBought, giftsToFill, hasGap, heldShops, inCategory, monthOf, parseBank, payFrom, plannedOpen, readCsv, salaryBase,
-  addLinked, bought, deposits, holdings, invested, isTrade, readLinked, readOpenbank, ruleKey, shiftMonth, sorter, strayDeposits,
+  addLinked, bought, deposits, holdings, invested, isTrade, readLinked, readOpenbank, ruleKey, shiftMonth, sorter, strayDeposits, tie,
 } from './bank.js';
 import {
   api, b64u, fromB64u, inviteId, isCode, makePasskey, merge, openData, rand, sealData, tokenOf, unwrap, usePasskey, wrap,
@@ -38,7 +38,8 @@ const SPAN = { week: 8, month: 6, year: 4 }; // how many periods the chart shows
 const STALE = 30; // days after which the overview asks for new bank files
 // Raise by one when the saved data gains something an older Kassa would drop while saving: the server then lets an
 // older Kassa read but not write (worker/index.js, PUT /vault), until that phone has the new one.
-const DATA = 2; // 2: the phones keep no copy; an older Kassa, which syncs a copy it keeps, may not write any more
+// 2: the phones keep no copy; an older Kassa, which syncs a copy it keeps, may not write any more
+const DATA = 3; // 3: a card knows the payment that bought it, a till payment the bank line of its pin part
 const START_IDS = new Set(START_CATS.map((cat) => cat.id));
 const KIND_ORDER = ['out', 'in', 'none'];
 
@@ -72,7 +73,10 @@ function store(key, value) {
   if (!sharing) localStorage.setItem(key, JSON.stringify(value));
 }
 
+// Every save first ties what belongs together (bank.js, tie): a new bank line to the till payment that waits for
+// it, a new card to the payment that bought it.
 function save() {
+  tie(bank, state);
   try {
     store(KEY, state);
   } catch {
@@ -97,6 +101,7 @@ function loadBank() {
 
 function saveBank() {
   try {
+    if (tie(bank, state)) store(KEY, state);
     store(BANK_KEY, bank);
   } catch {
     toast(L('Opslaan is mislukt: de opslag van de telefoon is vol.', 'Saving failed: the storage of the phone is full.'));
@@ -174,7 +179,10 @@ async function sync(tries = 3) {
       takeData(first || mine === onServer ? theirs : canonical(merge(JSON.parse(onServer), JSON.parse(mine), theirs)));
       sharing.version = remote.version;
       keepSharing(JSON.stringify(theirs));
-      if (first) catchUp(bank, isoDate()); // the bookings of the shop balances since the last opening; they go up below
+      if (first) {
+        catchUp(bank, isoDate()); // the bookings of the shop balances since the last opening; they go up below
+        tie(bank, state); // and what an earlier Kassa left untied
+      }
       changed = true;
     }
     const now = snapshot();
@@ -564,6 +572,9 @@ const purchaseById = (id) => state.purchases.find((purchase) => purchase.id === 
 const listed = (defaults, used) => [...new Set([...defaults, ...used.reverse()])];
 const people = () => listed([US], [...state.purchases, ...bank.txs].flatMap((each) => (each.shares ?? []).map((share) => share.who)));
 const whoText = (purchase) => purchase.shares.map((share) => shown(share.who)).join(', ');
+// the till payment a bank line is the pin part of, while that line is groceries (bank.js, tie)
+const tillOf = (tx, cat) => (cat === 'boodschappen' ? state.purchases.find((purchase) => purchase.tx === tx.id) : undefined);
+const dayOf = (purchase) => isoDate(new Date(purchase.at));
 
 function expiryLabel(card) {
   if (!card.expiry) return '';
@@ -641,6 +652,7 @@ function cardsScreen() {
   const spent = state.cards.length - active.length;
   const month = periodStart('month', new Date());
   const thisMonthPaid = summarize(state.purchases, month, shiftPeriod('month', month, 1)).cards;
+  const toAdd = cardsToAdd(bank, state.cards, isoDate()); // paid for, but number and code are not in the app
   // the first card is the one to use next, so it alone gets the blue pass
   const passes = active.map((card, index) => `
     <li><a class="pass${index ? '' : ' next'}" href="#/kaart/${card.id}">
@@ -660,6 +672,11 @@ function cardsScreen() {
         <p class="footnote">${L(plural(active.length, 'kaart', 'kaarten'), plural(active.length, 'card', 'cards'))}</p>
       </section>
       ${backupNotice()}
+      ${toAdd.length ? `
+        <h2 class="section">${L('Gekocht, nog niet in de app', 'Bought, not in the app yet')}</h2>
+        <div class="group">${toAdd.map((tx) => `
+          <button class="row tint" data-action="addBought" data-id="${esc(tx.id)}"><span class="row-main">${L('Kaart toevoegen', 'Add card')}
+            <small>${formatEuro(tx.gift.value)} · ${L('gekocht op', 'bought on')} ${dayShort(tx.date)}</small></span>${icon('plus')}</button>`).join('')}</div>` : ''}
       <h2 class="section">${L('Kaarten', 'Cards')}</h2>
       ${active.length
         ? `<ul class="passes">${passes}</ul>`
@@ -750,7 +767,8 @@ const meterBar = (share, { over = false, pace = null, rank = false } = {}) => `
 // screen around it already says: the category on a category's own screen, the account when one is chosen.
 function txRow(tx, catOf, { category = true, account = true, toFill } = {}) {
   const cat = catOf(tx);
-  const others = cat === 'boodschappen' ? (tx.shares ?? []).filter((share) => share.who !== US).map((share) => esc(shown(share.who))) : [];
+  const till = tillOf(tx, cat); // then who it was for is the purchase's to say
+  const others = cat === 'boodschappen' && !till ? (tx.shares ?? []).filter((share) => share.who !== US).map((share) => esc(shown(share.who))) : [];
   const gift = tx.gift ? `${esc(tx.gift.shop)} ${formatEuro(tx.gift.value)}${cat !== 'cadeaukaarten' || !heldShops(bank).has(tx.gift.shop) ? ''
     : ` · ${tx.gift.shop === AH ? L('op de kaart', 'on the card') : L('op het saldo', 'on the balance')}`}`
     : toFill?.has(tx.id) ? `<span class="todo">${L('winkel invullen', 'fill in the shop')}</span>` : '';
@@ -759,9 +777,24 @@ function txRow(tx, catOf, { category = true, account = true, toFill } = {}) {
       <span class="row-main">${esc(tx.name)} <small>${dayShort(tx.date)}${tx.early ? ` · ${L('voorlopig', 'provisional')}` : ''}${
         category ?` · <span${cat ? '' : ' class="todo"'}>${catName(cat)}</span>` : ''}${
         others.length ? ` · ${L('ook voor', 'also for')} ${others.join(', ')}` : ''}${gift ? ` · ${gift}` : ''}${
+        till ? ` · ${L('deel van', 'part of')} ${formatEuro(till.total)}` : ''}${
         account ? ` · ${esc(nameOf(accountById(tx.acc)))}` : ''}</small></span>
       <span class="amount${tx.cents > 0 ? ' plus' : ''}">${signed(tx.cents)}</span>
     </button></li>`;
+}
+
+// A payment at the AH till in the groceries list: one row for the cards and the bank line of the pin part together.
+function tillRow(purchase) {
+  const others = purchase.shares.filter((share) => share.who !== US).map((share) => esc(shown(share.who)));
+  const how = purchase.wait ? `${L('cadeaukaart', 'gift card')} · <span class="todo">${L('pin volgt', 'debit card to follow')}</span>`
+    : purchase.total === purchase.cards ? L('cadeaukaart', 'gift card')
+    : purchase.cards ? L('cadeaukaart + pin', 'gift card + debit card') : L('pin', 'debit card');
+  return `
+    <li><a class="row tx" href="#/uitgave/${purchase.id}">
+      <span class="row-main">${esc(shown(purchase.store))} <small>${dayShort(dayOf(purchase))} · ${how}${
+        others.length ? ` · ${L('ook voor', 'also for')} ${others.join(', ')}` : ''}</small></span>
+      <span class="amount">${signed(-purchase.total)}</span>
+    </a></li>`;
 }
 
 // what is left of a pot's amount, or how far it is over, in red then
@@ -1067,10 +1100,13 @@ function overviewScreen() {
   const ending = sharing ? Object.entries(links.banks).filter(([, until]) => daysLeft(until.slice(0, 10), today) <= 14) : [];
   const expiring = state.cards.filter((card) => balance(card) > 0 && ['soon', 'expired'].includes(expiryState(card.expiry, today)));
   const toFill = giftsToFill(bank).length;
+  const toAdd = cardsToAdd(bank, state.cards, today);
   const todos = [
     open && todo('href="#/categorie/open"', 'list', false, L(`${plural(open, 'transactie', 'transacties')} indelen`, `Sort ${plural(open, 'transaction', 'transactions')}`)),
     toFill && todo('data-action="fillGifts"', 'card', false, L(`${plural(toFill, 'cadeaukaart', 'cadeaukaarten')} invullen`,
       `Fill in ${plural(toFill, 'gift card', 'gift cards')}`), L('Winkel en waarde', 'Shop and value')),
+    toAdd.length && todo(`data-action="addBought" data-id="${esc(toAdd[0].id)}"`, 'card', false, L(`${plural(toAdd.length, 'AH-kaart', 'AH-kaarten')} toevoegen`,
+      `Add ${plural(toAdd.length, 'AH card', 'AH cards')}`), L('Kaartnummer en beveiligingscode', 'Card number and security code')),
     missing.length ? todo('data-action="upload"', 'upload', true, L(`Bestand van ${monthLong(lastMonth)} uploaden`, `Upload the file for ${monthLong(lastMonth)}`),
       L(`Nog niet compleet: ${names(missing)}`, `Not complete yet: ${names(missing)}`))
       : oldest > STALE && todo('data-action="upload"', 'upload', true, L('Nieuwe bankbestanden uploaden', 'Upload new bank files'),
@@ -1345,15 +1381,24 @@ function categoryScreen(id) {
   const everyone = cat?.id === 'boodschappen' || forOthers ? forWhom(bank, state.purchases, from, to) : [];
   const who = forOthers ? everyone.filter(([name]) => name !== US) : everyone.some(([name]) => name !== US) ? everyone : [];
   const whoTotal = Math.max(1, who.reduce((sum, [, cents]) => sum + Math.max(0, cents), 0));
+  // Groceries: a payment at the till is one row, the cards and the bank line of its pin part together, so it can
+  // be split as one. That line is then not a row of its own, and under "Bij wie" it counts with the cards.
+  const since = from > bank.since ? from : bank.since;
+  const tills = cat?.id === 'boodschappen' ? state.purchases.filter((purchase) => (purchase.cards || purchase.tx) && dayOf(purchase) >= since && dayOf(purchase) < to) : [];
+  const inTill = new Set(tills.map((purchase) => purchase.tx));
   const fromCards = !cat ? 0 : forOthers ? who.reduce((sum, [, cents]) => sum + cents, 0)
-    : figures({ ...bank, txs: [] }, state.purchases, from, to).byCat.get(cat.id) ?? 0;
+    : (figures({ ...bank, txs: [] }, state.purchases, from, to).byCat.get(cat.id) ?? 0) + txs.reduce((sum, tx) => sum - (inTill.has(tx.id) ? tx.cents : 0), 0);
   const total = cat?.kind === 'none' ? txs.reduce((sum, tx) => sum + tx.cents, 0) : (monthFigures(view.month).byCat.get(cat?.id ?? '') ?? 0);
-  const parties = byParty(txs);
+  const parties = byParty(txs.filter((tx) => !inTill.has(tx.id)));
   // the size of a bar: what was spent (or, for income, received); money the other way gets none. Unsorted money counts either way.
   const size = (party) => (cat && cat.kind !== 'none' ? Math.max(0, sign * party.cents) : Math.abs(party.cents));
   const whole = Math.max(1, fromCards + parties.reduce((sum, party) => sum + size(party), 0)); // the bars are shares of this
   const months = Array.from({ length: 6 }, (unused, index) => shiftMonth(view.month >= shiftMonth(thisMonth(), -5) ? thisMonth() : view.month, index - 5));
-  const shownRows = txs.slice(0, view.rows);
+  const rows = [
+    ...tills.map((purchase) => [dayOf(purchase), () => tillRow(purchase)]),
+    ...txs.filter((tx) => !inTill.has(tx.id)).map((tx) => [tx.date, () => txRow(tx, catOf, { category: false, toFill })]),
+  ].sort((a, b) => b[0].localeCompare(a[0]));
+  const shownRows = rows.slice(0, view.rows);
   const gifts = cat?.id === 'cadeaukaarten'; // everything here was paid to the shop that sells the cards: the shops the cards are for say more
   const toFill = giftIds();
   return {
@@ -1380,7 +1425,7 @@ function categoryScreen(id) {
           <li class="row meter-row"><span class="row-main">${esc(shown(name))}</span>
             <span>${formatEuro(cents)}</span>${meterBar(Math.max(0, cents) / whoTotal, { rank: true })}</li>`).join('')}</ul>` : ''}
       ${gifts ? `${fillRow() && `<div class="group">${fillRow()}</div>`}${giftSections(from, to)}` : ''}
-      ${parties.length || fromCards ? `
+      ${rows.length || fromCards ? `
         ${gifts ? '' : `
         <h2 class="section">${cat ? L('Bij wie', 'Where') : L('Per naam, grootste eerst', 'Per name, largest first')}</h2>
         <ul class="group">
@@ -1395,10 +1440,10 @@ function categoryScreen(id) {
             </button></li>`).join('')}
         </ul>`}
         <h2 class="section">${L('Transacties', 'Transactions')}</h2>
-        <ul class="group">${shownRows.map((tx) => txRow(tx, catOf, { category: false, toFill })).join('')}</ul>
-        ${txs.length > shownRows.length ? `<div class="group"><button class="row tint" data-action="moreRows">${L('Toon meer', 'Show more')}</button></div>` : ''}
-        ${cat?.id === 'boodschappen' ? `<p class="group-note">${L('Was iets, of een deel ervan, voor iemand anders? Tik op de transactie en kies Voor wie.',
-          'Was something, or part of it, for someone else? Tap the transaction and choose For whom.')}</p>` : ''}
+        <ul class="group">${shownRows.map(([, row]) => row()).join('')}</ul>
+        ${rows.length > shownRows.length ? `<div class="group"><button class="row tint" data-action="moreRows">${L('Toon meer', 'Show more')}</button></div>` : ''}
+        ${cat?.id === 'boodschappen' ? `<p class="group-note">${L('Was iets, of een deel ervan, voor iemand anders? Tik op de transactie en kies Voor wie. Wat je bij AH met cadeaukaarten en pin betaalde, staat hier als één aankoop.',
+          'Was something, or part of it, for someone else? Tap the transaction and choose For whom. What you paid at AH with gift cards and debit card is one purchase here.')}</p>` : ''}
         ${gifts ? `<p class="group-note">${L(`Een kaart van ${AH}, of van een winkel waarvan je het saldo bijhoudt, telt hier niet mee: het geld telt als uitgave zodra je ermee betaalt.`,
           `A card for ${AH}, or for a shop whose balance you keep, does not count here: the money counts as spending once you pay with it.`)}</p>` : ''}`
       : blank(cat ? L('Niets in deze maand', 'Nothing this month') : L('Alles is ingedeeld', 'Everything is sorted'))}`,
@@ -2042,12 +2087,27 @@ const newPurchase = (store, total, cards) => ({
   id: crypto.randomUUID(), at: new Date().toISOString(), store, total, cards, shares: [{ who: US, cents: total }],
 });
 
-// Ends a payment with the cards that were used: asks the total, records what each card lost and the
-// purchase itself, and then asks who it was for. Whatever the cards could not cover went by pin.
+// Ends a payment with the cards that were used, the last one last. Was everything paid with them, then the total
+// says what the last card has left, and who it was for is asked. Was the rest paid by pin, then every card is empty
+// and nothing has to be typed at the till: the bank line of the pin part joins the purchase by itself once it is
+// there (bank.js, tie), and with it the total is known.
 async function finishPayment(cards) {
+  if (!cards.length) {
+    toast(L('Geen kaart gebruikt: er is niets vastgelegd.', 'No card used: nothing was recorded.'));
+    goCards();
+    return;
+  }
   const balances = cards.map(balance);
-  const earlier = balances.slice(0, -1).reduce((sum, cents) => sum + cents, 0);
-  const total = await askAmount(L('Afronden', 'Finish'), L('Totaalbedrag', 'Total amount'), (cents) => {
+  const held = balances.reduce((sum, cents) => sum + cents, 0);
+  const earlier = held - balances.at(-1);
+  const answer = await confirmWith(`${cards.length === 1 ? L(`Kaart ${last4(cards[0])} met ${formatEuro(held)}.`, `Card ${last4(cards[0])} with ${formatEuro(held)}.`)
+    : L(`${cards.length} kaarten met samen ${formatEuro(held)}.`, `${cards.length} cards with ${formatEuro(held)} together.`)} ${
+    L('Is alles met cadeaukaarten betaald?', 'Was everything paid with gift cards?')}`,
+  L('Ja, alles met cadeaukaarten', 'Yes, all with gift cards'), true, L('Nee, ook gepind', 'No, by debit card too'));
+  if (!answer) return;
+  const wait = answer === 'alt';
+  // a total above what the cards held is fine too: then the rest was pin after all, and the amount is known
+  const total = wait ? held : await askAmount(L('Afronden', 'Finish'), L('Totaalbedrag van de bon', 'Total on the receipt'), (cents) => {
     if (settle(balances, cents) !== 'low') return '';
     return earlier
       ? L(`Dat dekten de vorige kaarten al (${formatEuro(earlier)}). Ga terug met Vorige.`,
@@ -2057,17 +2117,17 @@ async function finishPayment(cards) {
   if (total === null) return;
   const taken = settle(balances, total);
   const fromCards = taken.reduce((sum, cents) => sum + cents, 0);
-  const purchase = newPurchase('AH', total, fromCards);
+  const purchase = { ...newPurchase('AH', total, fromCards), ...(wait && { wait }) };
   cards.forEach((card, index) => card.entries.push({ ...newEntry('pay', -taken[index]), purchase: purchase.id }));
   state.purchases.push(purchase);
   save();
-  toast(!fromCards ? L(`${formatEuro(total)} vastgelegd.`, `${formatEuro(total)} recorded.`)
+  const from = L(`${formatEuro(fromCards)} van ${plural(cards.length, 'kaart', 'kaarten')}`, `${formatEuro(fromCards)} from ${plural(cards.length, 'card', 'cards')}`);
+  toast(wait ? L(`${from}. De pinbetaling komt erbij zodra de bank hem laat zien.`, `${from}. The debit card payment joins once the bank shows it.`)
     : total > fromCards ? L(`${formatEuro(fromCards)} met kaarten, ${formatEuro(total - fromCards)} met pin.`,
       `${formatEuro(fromCards)} by gift card, ${formatEuro(total - fromCards)} by debit card.`)
-    : L(`${formatEuro(fromCards)} afgeschreven van ${plural(cards.length, 'kaart', 'kaarten')}.`,
-      `${formatEuro(fromCards)} taken from ${plural(cards.length, 'card', 'cards')}.`));
+    : `${from}.`);
   goCards();
-  askWho(purchase);
+  if (!wait) askWho(purchase); // while the pin part is to come there is no total to split yet: that is done on the purchase
 }
 
 // ---------- purchases and statistics ----------
@@ -2148,18 +2208,31 @@ function statsScreen() {
   };
 }
 
+// One purchase at the till with everything it was paid with: each card and what it cost at the time, and the bank
+// line of the pin part. It is reached from the groceries and from the till payments, so back goes where it came from.
 function purchaseScreen(purchase) {
   const day = new Date(purchase.at).toLocaleDateString(LOCALE, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  const line = bank.txs.find((tx) => tx.id === purchase.tx);
+  const pin = purchase.total - purchase.cards;
+  const used = state.cards.flatMap((card) => card.entries.filter((entry) => entry.purchase === purchase.id).map((entry) => ({ card, cents: -entry.delta })));
+  const gone = purchase.cards - used.reduce((sum, each) => sum + each.cents, 0); // paid with a card that was deleted since
+  // what the card cost: its part of the payment that bought it, which may have bought more cards
+  const cost = (card) => {
+    const paid = bank.txs.find((tx) => tx.id === card.tx && tx.gift);
+    const start = card.entries[0]?.delta;
+    return paid && start > 0 ? ` <small>${formatEuro(start)} ${L('gekocht voor', 'bought for')} ${formatEuro(Math.round(-paid.cents * start / paid.gift.value))}</small>` : '';
+  };
   return {
     html: `
       <header class="navbar">
-        <a class="back" href="#/uitgaven">${icon('back')}${L('Bij de kassa', 'At the till')}</a>
+        ${backButton()}
         <h1>${esc(shown(purchase.store))}</h1>
         <button class="text-button" data-action="editPurchase">${L('Bewerken', 'Edit')}</button>
       </header>
       <section class="summary">
         <p class="footnote">${day}</p>
         <p class="total">${formatEuro(purchase.total)}</p>
+        ${purchase.wait ? `<p class="footnote">${L('zonder wat je pinde: dat komt erbij zodra de bank het laat zien', 'without what went by debit card: that joins once the bank shows it')}</p>` : ''}
       </section>
       <h2 class="section">${L('Voor wie', 'For whom')}</h2>
       <div class="group">
@@ -2168,7 +2241,16 @@ function purchaseScreen(purchase) {
         <button class="row tint" data-action="who">${L('Wijzigen', 'Change')}</button>
       </div>
       <h2 class="section">${L('Betaald met', 'Paid with')}</h2>
-      ${paidWith(purchase.cards, purchase.total)}
+      <div class="group">
+        ${used.map(({ card, cents }) => `
+          <p class="row"><span class="row-main">${L('Kaart', 'Card')} ${last4(card)}${cost(card)}</span>${formatEuro(cents)}</p>`).join('')}
+        ${gone > 0 ? `<p class="row"><span class="row-main">${L('Cadeaukaarten', 'Gift cards')}</span>${formatEuro(gone)}</p>` : ''}
+        ${purchase.wait ? `<p class="row"><span class="row-main">${L('Pin', 'Debit card')} <small>${L('Nog niet bij de bank', 'Not at the bank yet')}</small></span><span class="quiet">…</span></p>
+          <button class="row tint" data-action="noPin">${L('Er is niet gepind', 'Nothing was paid by debit card')}</button>`
+        : pin > 0 ? `<p class="row"><span class="row-main">${L('Pin', 'Debit card')} <small>${line ? `${esc(line.name)} · ${dayShort(line.date)} · ${esc(nameOf(accountById(line.acc)))}`
+          : L('Niet gevonden bij de bank', 'Not found at the bank')}</small></span>${formatEuro(pin)}</p>` : ''}
+        ${line && purchase.cards ? `<button class="row tint" data-action="untie">${L('Deze pinbetaling hoort er niet bij', 'This debit card payment is not part of it')}</button>` : ''}
+      </div>
       <div class="group">
         <button class="row danger" data-action="deletePurchase">${L('Verwijderen', 'Delete')}</button>
       </div>`,
@@ -2204,7 +2286,7 @@ const TABS = [
 ];
 const TAB_OF = {
   '': 'overzicht', meer: 'overzicht', categorieen: 'overzicht', beleggen: 'overzicht', potjes: 'potjes',
-  kaarten: 'betalen', kaart: 'betalen', betalen: 'betalen', archief: 'betalen', uitgaven: 'betalen', uitgave: 'betalen',
+  kaarten: 'betalen', kaart: 'betalen', betalen: 'betalen', archief: 'betalen', uitgaven: 'betalen', // a purchase (uitgave) keeps the tab it was opened from
   inzicht: 'inzicht', transacties: 'transacties',
 };
 let tab = 'overzicht'; // a category and the fixed costs are reached from several tabs and keep the one they came from
@@ -2335,12 +2417,19 @@ function openDialog(dialog, check = () => '') {
   });
 }
 
-// Asks to confirm. The button is red, as most of these delete something; `safe` makes it the plain blue.
-async function ask(text, okLabel, safe = false) {
+// The sheet that asks to confirm, or with `altLabel` to choose between two answers. Resolves with 'ok', 'alt' (the
+// second answer) or '' when cancelled. The first button is red, as most of these delete something; `safe` makes it blue.
+function confirmWith(text, okLabel, safe, altLabel = '') {
   $('confirmText').textContent = text;
   $('confirmOk').textContent = okLabel;
   $('confirmOk').className = safe ? 'row tint' : 'row danger';
-  return await openDialog($('confirmDialog')) === 'ok';
+  $('confirmAlt').textContent = altLabel;
+  $('confirmAlt').hidden = !altLabel;
+  return openDialog($('confirmDialog'));
+}
+
+async function ask(text, okLabel, safe = false) {
+  return await confirmWith(text, okLabel, safe) === 'ok';
 }
 
 // Resolves with the entered amount in cents, or null when cancelled.
@@ -2467,7 +2556,8 @@ async function askTx(tx) {
   // "Voor wie?" shows while Boodschappen is the chosen category; the answer is kept here until the sheet is saved
   let shares = tx.shares ?? [{ who: US, cents: -tx.cents }];
   const showWho = () => {
-    $('txWhoGroup').hidden = tx.cents >= 0 || form.elements.cat.value !== 'boodschappen';
+    // not for the pin part of a till payment: who that was for is said on the purchase
+    $('txWhoGroup').hidden = tx.cents >= 0 || form.elements.cat.value !== 'boodschappen' || state.purchases.some((purchase) => purchase.tx === tx.id);
     $('txWhoNow').textContent = shares.map((share) => shown(share.who)).join(', ');
   };
   // "Cadeaukaart" shows while the gift card category is chosen, and on a card that counts somewhere else as long
@@ -2497,6 +2587,7 @@ async function askTx(tx) {
   }
   if (answer !== 'ok') return;
   const cat = form.elements.cat.value;
+  const filled = gift !== tx.gift; // what it bought was filled in or changed in this sheet
   if (keepsGift() && gift) tx.gift = gift;
   else delete tx.gift;
   if (cat === 'boodschappen' && tx.cents < 0 && shares.some((share) => share.who !== US)) tx.shares = shares;
@@ -2511,6 +2602,7 @@ async function askTx(tx) {
   else delete tx.cat;
   if (!$('txFixedRow').hidden && fixed.checked !== (bank.fixed[key] === true)) bank.fixed[key] = fixed.checked;
   saveBank();
+  if (filled && needsCard(tx)) await addBought(tx);
 }
 
 // Asks for a payment from a shop's balance: once, or every month from its date on. A name the app has not
@@ -2730,19 +2822,29 @@ async function importBankFiles() {
 
 // ---------- actions ----------
 
-// Adds a card, or edits `card` when given.
-async function editCard(card) {
+// what an AH gift card payment bought that is not on a card in the app yet
+const worthLeft = (tx) => tx.gift.value - state.cards.reduce((sum, card) => sum + (card.tx === tx.id ? card.entries[0]?.delta ?? 0 : 0), 0);
+
+// Adds a card, or edits `card` when given. `bought` is the bank payment that bought the new card: what it is worth
+// is filled in, and a card that is in the app already is tied to the payment instead of refused.
+// Resolves with true when something was saved.
+async function editCard(card, bought) {
   const form = $('cardDialog').querySelector('form');
   const field = form.elements;
   form.reset();
   $('cardTitle').textContent = card ? L('Kaart bewerken', 'Edit card') : L('Kaart toevoegen', 'Add card');
+  $('cardNote').hidden = !bought;
+  $('cardNote').textContent = bought ? L(`${AH}, ${formatEuro(-bought.cents)} betaald op ${dayShort(bought.date)}. Het nummer en de code staan in de mail van de kaart. Was de kaart niet voor jezelf, deel de betaling dan anders in.`,
+    `${AH}, ${formatEuro(-bought.cents)} paid on ${dayShort(bought.date)}. The number and the code are in the email with the card. Was the card not for yourself, then sort the payment differently.`) : '';
   field.start.closest('label').hidden = Boolean(card); // the balance of an existing card changes through its history
   if (card) {
     field.number.value = groupNumber(card.number);
     field.code.value = card.code;
     field.expiry.value = card.expiry;
   }
+  if (bought) field.start.value = euroInput(worthLeft(bought));
   let next;
+  let known; // the card with that number, when it is in the app already
   const answer = await openDialog($('cardDialog'), () => {
     next = {
       number: cleanDigits(field.number.value),
@@ -2750,24 +2852,37 @@ async function editCard(card) {
       expiry: field.expiry.value,
       start: parseEuro(field.start.value),
     };
+    known = state.cards.find((other) => other !== card && other.number === next.number);
     if (!validNumber(next.number)) return L('Het kaartnummer moet 19 cijfers hebben.', 'The card number must have 19 digits.');
     if (!validCode(next.code)) return L('De beveiligingscode moet 6 cijfers hebben.', 'The security code must have 6 digits.');
-    if (state.cards.some((other) => other !== card && other.number === next.number)) return L('Deze kaart staat er al in.', 'This card is already in the app.');
-    if (!card && !next.start) return L('Vul het saldo in, bijvoorbeeld 25,00.', 'Enter the balance, for example 25.00.');
+    if (known && (!bought || known.tx === bought.id)) return L('Deze kaart staat er al in.', 'This card is already in the app.');
+    if (!card && !known && !next.start) return L('Vul het saldo in, bijvoorbeeld 25,00.', 'Enter the balance, for example 25.00.');
     if (next.expiry && !isDate(next.expiry)) return ENTER_DATE;
     return '';
   });
-  if (answer !== 'ok') return;
+  if (answer !== 'ok') return false;
   const { number, code, expiry, start } = next;
-  if (!card) {
-    state.cards.push({ id: crypto.randomUUID(), number, code, expiry, entries: [newEntry('start', start)] });
+  if (known) {
+    known.tx = bought.id; // its balance and history stay as they are
+    toast(L(`Kaart ${last4(known)} stond er al in en hoort nu bij deze aankoop.`, `Card ${last4(known)} was in the app already and now belongs to this purchase.`));
+  } else if (!card) {
+    state.cards.push({ id: crypto.randomUUID(), number, code, expiry, ...(bought && { tx: bought.id }), entries: [newEntry('start', start)] });
     state.needsBackup = true;
   } else {
     if (card.number !== number || card.code !== code) state.needsBackup = true;
     Object.assign(card, { number, code, expiry });
   }
   save();
+  return true;
 }
+
+// Asks for the cards an AH gift card payment bought, one after the other until they hold what was bought: one
+// payment can buy several cards. Stopping halfway is fine: Kaarten keeps asking for a payment without any card.
+async function addBought(tx) {
+  while (worthLeft(tx) > 0 && await editCard(undefined, tx));
+}
+// the AH gift card payment that has no card in the app yet, when `tx` is one
+const needsCard = (tx) => cardsToAdd(bank, state.cards, isoDate()).includes(tx);
 
 // Edits a purchase. New ones only come from paying with cards: what was paid by pin is on the bank statement.
 async function editPurchase(purchase) {
@@ -2800,6 +2915,10 @@ async function editPurchase(purchase) {
   const wasSplit = purchase.shares.length > 1;
   const resized = next.total !== purchase.total;
   Object.assign(purchase, { store: next.store, at, total: next.total });
+  if (resized) {
+    delete purchase.wait; // a total that was typed is the total: nothing is waited for
+    delete purchase.tx; // and it has another pin part; the bank line of that amount is found on saving (tie)
+  }
   if (resized) purchase.shares = [{ who: purchase.shares[0].who, cents: next.total }]; // a new total needs a new split
   save();
   if (resized && wasSplit) askWho(purchase);
@@ -2886,7 +3005,13 @@ const actions = {
 
   // the bank side
   upload: () => $('bankFiles').click(),
-  tx: (card, button) => askTx(bank.txs.find((tx) => tx.id === button.dataset.id)),
+  // the pin part of a till payment opens that purchase: it is sorted and split there, as one
+  tx(card, button) {
+    const tx = bank.txs.find((each) => each.id === button.dataset.id);
+    const till = tillOf(tx, sorter(bank)(tx));
+    if (till) go(`#/uitgave/${till.id}`);
+    else askTx(tx);
+  },
   sortParty: (card, button) => askTx(bank.txs.find((tx) => tx.id === button.dataset.id)),
   addCat: () => editCat(),
   editCat: (card, button) => editCat(catById(button.dataset.id)),
@@ -2906,8 +3031,10 @@ const actions = {
       if (!gift) return;
       tx.gift = gift;
       saveBank();
+      if (needsCard(tx)) await addBought(tx); // an AH card: its number and code right away, so it is in Kaarten
     }
   },
+  addBought: (card, button) => addBought(bank.txs.find((tx) => tx.id === button.dataset.id)),
   // a shop's balance
   async startBalance(card, button) {
     const shop = button.dataset.id;
@@ -3055,8 +3182,27 @@ const actions = {
     state.purchases = state.purchases.filter((each) => each !== purchase);
     for (const card of state.cards) card.entries = card.entries.filter((entry) => entry.purchase !== purchase.id);
     save();
-    go('#/uitgaven');
+    actions.back();
   },
+  // "Nee, ook gepind" was a slip, or the rest was paid some other way: the purchase is what the cards paid
+  noPin() {
+    delete currentPurchase().wait;
+    save();
+  },
+  // The bank line is not this purchase's pin part: the purchase goes back to what the cards paid, and the line is
+  // a transaction of its own again. Typing the real total (Bewerken) finds the right line.
+  async untie() {
+    const purchase = currentPurchase();
+    const pin = purchase.total - purchase.cards;
+    if (!await ask(L(`Hoort de pinbetaling van ${formatEuro(pin)} niet bij deze aankoop? De aankoop wordt dan ${formatEuro(purchase.cards)}.`,
+      `Is the debit card payment of ${formatEuro(pin)} not part of this purchase? The purchase then becomes ${formatEuro(purchase.cards)}.`), L('Loskoppelen', 'Take it off'))) return;
+    const main = purchase.shares[0].who;
+    const kept = shareOut(purchase.cards, main, purchase.shares.slice(1).map((share) => [share.who, share.cents]));
+    Object.assign(purchase, { total: purchase.cards, shares: kept === 'over' ? [{ who: main, cents: purchase.cards }] : kept });
+    delete purchase.tx;
+    save();
+  },
+  alt: (card, button) => closeDialog(button.closest('dialog'), 'alt'),
 
   // the statistics screen: week, month or year, and which one
   statUnit(card, button) {
@@ -3192,6 +3338,7 @@ if (navigator.serviceWorker?.controller) {
 if (sharing) forgetLocal();
 state = load();
 bank = loadBank();
+if (tie(bank, state)) save(); // what an earlier Kassa left untied
 if (catchUp(bank, isoDate()).length) saveBank();
 else render();
 sync();
