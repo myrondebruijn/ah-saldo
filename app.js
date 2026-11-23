@@ -329,7 +329,8 @@ const keepLinks = () => localStorage.setItem(LINKS_KEY, JSON.stringify(links));
 
 // `asked`: the Fetch now button, which does not wait for the hour and says how it went
 async function fetchBank(asked = false) {
-  if (!sharing || (!asked && Date.now() - (links.at ?? 0) < HOUR)) return;
+  const announced = await globalThis.caches?.delete('kassa-news'); // a notification came in since (sw.js): don't wait for the hour
+  if (!sharing || (!asked && !announced && Date.now() - (links.at ?? 0) < HOUR)) return;
   links.at = Date.now(); // a failed try waits an hour too
   keepLinks();
   if (asked) toast(L('Ophalen bij de bank…', 'Fetching from the bank…'));
@@ -1733,7 +1734,7 @@ function txList() {
   const found = bank.txs.filter((tx) => (view.acc === 'all' || tx.acc === view.acc)
     && (view.cat === 'all' || catOf(tx) === wanted)
     && (!words || `${tx.name} ${tx.text} ${euroInput(Math.abs(tx.cents))}`.toLowerCase().includes(words)))
-    .sort((a, b) => b.date.localeCompare(a.date));
+    .reverse().sort((a, b) => b.date.localeCompare(a.date)); // within a day too the newest on top: the last added
   if (!found.length) return blank(L('Niets gevonden', 'Nothing found'));
   const months = new Map();
   const toFill = giftIds();

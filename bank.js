@@ -456,7 +456,7 @@ export function inCategory(bank, cat, from, to) {
   const catOf = sorter(bank);
   const start = from > bank.since ? from : bank.since;
   return bank.txs.filter((tx) => tx.date >= start && tx.date < to && catOf(tx) === cat)
-    .sort((a, b) => b.date.localeCompare(a.date));
+    .reverse().sort((a, b) => b.date.localeCompare(a.date)); // within a day too: the last added on top
 }
 
 // Transactions per counterparty: [{ key, name, cents, count }], the largest amount first.

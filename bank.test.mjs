@@ -445,6 +445,8 @@ test('inCategory and byParty list what is behind a figure', () => {
   const data = loaded();
   const open = bank.inCategory(data, '', '2026-06-01', '2026-08-01');
   assert.deepEqual(open.map((each) => each.date), ['2026-07-01', '2026-06-28', '2026-06-26', '2026-06-26', '2026-06-25']);
+  const sameDay = data.txs.filter((each) => open.includes(each) && each.date === '2026-06-26');
+  assert.deepEqual(open.filter((each) => each.date === '2026-06-26'), sameDay.reverse()); // the last added on top
   assert.deepEqual(bank.byParty(open).map(({ name, cents, count }) => [name, cents, count]), [
     ['Voorbeeld B.V.', 300000, 1], ['J. Jansen', -10000, 1], ['Bakker "De Korst", Dorp', -2500, 2], ['AAB INZ TIKKIE', 2000, 1],
   ]);
