@@ -208,15 +208,46 @@ test('the Openbank link gives the lines of the statement the same ids, by workin
   assert.equal(data.txs.length, 7);
 });
 
-test('an Openbank line the bank has not numbered yet waits, and is taken off the balance that counts it', () => {
+test('an Openbank line that has no number yet is read at once, and read again until it has one', () => {
   const pdf = bank.readOpenbank(statement(OPENBANK, { closing: '14.88' }));
-  const today = openbankLink([['2026-07-04', ['OVERBOEKING TEN GUNSTE VAN Bakker'], '-4.88', '10.00'], ...OPENBANK], '10.00');
-  today[0].txs[0].entry_reference = null; // as the bank sends a line of a day that is not over
-  const file = bank.readLinked(today);
-  assert.deepEqual(file.txs, pdf.txs); // the numbered lines keep the statement's ids
-  assert.equal(file.accounts[0].balance, 1488); // the balance after the last line that is there
-  today[0].txs[0].entry_reference = '2026-07-04.1'; // the day after
-  assert.equal(bank.readLinked(today).txs.length, pdf.txs.length + 1);
+  const slager = ['2026-07-04', ['OVERBOEKING TEN GUNSTE VAN Slager'], '-3.00', '7.00'];
+  const bakker = ['2026-07-04', ['OVERBOEKING TEN GUNSTE VAN Bakker'], '-4.88', '10.00'];
+  const link = (newest, unnumbered) => {
+    const list = openbankLink([...newest, ...OPENBANK], '7.00');
+    for (const line of list[0].txs.slice(0, unnumbered)) line.entry_reference = null; // as a line of a day that is not over comes
+    return bank.readLinked(list);
+  };
+  const start = () => {
+    const data = bank.emptyBank();
+    bank.addFile(data, pdf, NOW);
+    return data;
+  };
+  const today = link([slager, bakker], 2);
+  // in the order sent, newest first, they get the ids they have once numbered; the lines before them keep the statement's
+  assert.deepEqual(today.txs.map(({ early, ...tx }) => tx), link([slager, bakker], 0).txs);
+  assert.deepEqual(today.txs.filter((tx) => tx.early).map((tx) => tx.name), ['Bakker', 'Slager']);
+  assert.deepEqual(today.txs.slice(0, -2), pdf.txs);
+  const add = (to) => bank.addLinked(to, link([slager, bakker], 2), NOW); // a file's lines become the saved ones: a fresh one each time
+  let data = start();
+  assert.deepEqual(add(data), { added: 2, skipped: [] });
+  assert.deepEqual([data.accounts[0].balance, data.accounts[0].through], [700, '2026-07-04']);
+  assert.deepEqual(bank.parseBank(JSON.parse(JSON.stringify(data))).txs, data.txs); // saved and read back, early stays
+  // the day after, numbered in that order: nothing new, early no longer, what the user gave the line is kept
+  data.txs.at(-1).cat = 'boodschappen';
+  assert.deepEqual(bank.addLinked(data, link([slager, bakker], 0), NOW), { added: 0, skipped: [] });
+  assert.deepEqual([data.txs.some((tx) => tx.early), data.txs.at(-1).cat, data.txs.length], [false, 'boodschappen', 8]);
+  // numbered the other way round: the lines they became take their place, nothing is there twice
+  data = start();
+  add(data);
+  assert.deepEqual(bank.addLinked(data, link([bakker, slager], 0), NOW), { added: 2, skipped: [] });
+  assert.deepEqual([data.txs.some((tx) => tx.early), data.txs.length, bank.balanceOn(data, data.accounts[0])], [false, 8, 700]);
+  // a fetch that does not reach back to the day of an early line leaves it alone, and so does one without that account
+  data = start();
+  add(data);
+  const later ={ accounts: today.accounts, txs: [{ ...today.txs[0], id: 'ES0000730100550000000001.later', date: '2026-07-09' }] };
+  bank.addLinked(data, later, NOW);
+  bank.addLinked(data, { accounts: [], txs: [] }, NOW);
+  assert.equal(data.txs.filter((tx) => tx.early).length, 2);
 });
 
 test('a balance on an earlier day follows from what was booked after it', () => {

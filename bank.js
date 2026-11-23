@@ -227,23 +227,20 @@ export function readLinked(list) {
   const accounts = [];
   const txs = [];
   for (const { iban, bank = 'Rabo', holder, txs: lines, balances } of list) {
-    const booked = lines.filter((each) => each.status === 'BOOK'); // pending lines may still change
-    // Openbank gives its lines no number: Enable Banking makes one up from a line's place in its day, and a line
-    // booked today came without (seen 2026-11-23; presumably the day has to be over first). Such a line has no place
-    // among the others yet, so it waits for a later fetch, and comes off the balance, which counts it already.
-    const early = bank === 'Openbank' ? booked.filter((line) => !line.entry_reference) : [];
-    const done = booked.filter((line) => !early.includes(line));
-    const stated = balances.find((each) => each.balance_type === 'ITBD') ?? balances.find((each) => each.balance_type === 'CLBD');
-    const now = stated ? toCents(stated.balance_amount.amount) : null;
-    const balance = now === null ? null : now - early.reduce((sum, line) => sum + signed(line), 0);
+    const booked = balances.find((each) => each.balance_type === 'ITBD') ?? balances.find((each) => each.balance_type === 'CLBD');
+    const balance = booked && toCents(booked.balance_amount.amount);
     const owner = tidy(holder).slice(0, 30);
     accounts.push({ id: iban, name: `${bank} ${iban.slice(-4)}`, bank, ...(Number.isInteger(balance) && { balance }), ...(bank === 'Openbank' && owner && { holder: owner }) });
+    const done = lines.filter((each) => each.status === 'BOOK'); // booked; pending lines may still change
     if (bank === 'Openbank') {
-      // A day's lines are numbered from the last one down (2026-11-18.3 came before 2026-11-18.2), and no line
-      // says the balance after it: that is worked back from the balance now, as the statement's ids need it.
-      if (!Number.isInteger(balance) || !done.every((line) => /^\d{4}-\d{2}-\d{2}\.\d+$/.test(line.entry_reference))) throw broken();
-      const counter = (line) => Number(line.entry_reference.split('.').pop());
-      const sorted = done.sort((a, b) => a.booking_date.localeCompare(b.booking_date) || counter(b) - counter(a)).map((line) => ({ line, cents: signed(line) }));
+      // Openbank gives its lines no number: Enable Banking makes one up from a line's place in its day, counted from
+      // the last one (2026-11-18.3 came before 2026-11-18.2), and a line booked today comes without (seen 2026-11-23;
+      // presumably the day has to be over first). Such a line is `early`: its place is taken from the order sent,
+      // newest first, and the next fetch reads it again (addLinked). No line says the balance after it: that is
+      // worked back from the balance now, as the statement's ids need it.
+      if (!Number.isInteger(balance) || !done.every((line) => !line.entry_reference || /^\d{4}-\d{2}-\d{2}\.\d+$/.test(line.entry_reference))) throw broken();
+      const sorted = done.map((line, index) => ({ line, cents: signed(line), place: line.entry_reference ? Number(line.entry_reference.split('.').pop()) : index - done.length }))
+        .sort((a, b) => a.line.booking_date.localeCompare(b.line.booking_date) || b.place - a.place);
       const afters = [];
       let after = balance; // after the newest line
       for (let index = sorted.length - 1; index >= 0; index--) {
@@ -252,7 +249,7 @@ export function readLinked(list) {
       }
       txs.push(...openbankTxs(iban, owner, sorted.map(({ line, cents }, index) => ({
         date: line.booking_date, cents, after: afters[index], concept: tidy((line.remittance_information ?? []).join(' ')),
-      }))));
+      }))).map((tx, index) => (sorted[index].line.entry_reference ? tx : { ...tx, early: true })));
       continue;
     }
     // Rabo: entry_reference is the Volgnr of the CSV export and the other fields hold what its columns hold. The date
@@ -285,7 +282,18 @@ export function addLinked(bank, file, now) {
     return file.txs.some((tx) => tx.acc === id && tx.date < through && !known.has(tx.id));
   });
   const kept = (id) => !skipped.includes(id);
-  return { added: addFile(bank, { accounts: file.accounts.filter((account) => kept(account.id)), txs: file.txs.filter((tx) => kept(tx.acc)) }, now), skipped };
+  const lines = file.txs.filter((tx) => kept(tx.acc));
+  // An early line saved before is read again here. Was its place in the day another after all, then the line it
+  // became has another id and takes its place, so nothing is counted twice; with the same id it is early no longer
+  // once the bank has numbered it. Only from the first day this fetch holds lines of that account for: before it,
+  // the fetch says nothing.
+  // shortcut: a category given by hand to an early line that changes its id is lost, carry it over if that ever happens.
+  const sent = new Map(lines.map((tx) => [tx.id, tx]));
+  const first = new Map();
+  for (const tx of lines) if (!(first.get(tx.acc) <= tx.date)) first.set(tx.acc, tx.date);
+  bank.txs = bank.txs.filter((tx) => !tx.early || sent.has(tx.id) || !(tx.date >= first.get(tx.acc)));
+  for (const tx of bank.txs) if (tx.early && sent.has(tx.id) && !sent.get(tx.id).early) delete tx.early;
+  return { added: addFile(bank, { accounts: file.accounts.filter((account) => kept(account.id)), txs: lines }, now), skipped };
 }
 
 // Adds what a file holds to the saved bank data and returns how many of its transactions were new.
@@ -698,6 +706,7 @@ const isTx = (tx) => typeof tx?.id === 'string' && /^[\w.-]{1,120}$/.test(tx.id)
   && Number.isInteger(tx.cents) && isText(tx.name, 60) && tx.name.length > 0 && isText(tx.text ?? '', 100)
   && (tx.iban === undefined || /^[A-Z0-9]{1,34}$/.test(tx.iban))
   && (tx.own === undefined || tx.own === true) && (tx.cat === undefined || isId(tx.cat))
+  && (tx.early === undefined || tx.early === true) // from a bank link, not numbered by the bank yet (readLinked)
   // shares split money that went out, name by name, and add up to all of it
   && (tx.shares === undefined || (tx.cents < 0 && Array.isArray(tx.shares) && tx.shares.length > 0
     && tx.shares.every((share) => isName(share?.who) && Number.isInteger(share.cents) && share.cents > 0)
@@ -736,8 +745,8 @@ export function parseBank(data) {
       ...(balance !== undefined && { balance }), ...(holder && { holder }), ...(card && { card }),
       ...(shop && { shop, monthly: monthly.map(({ name: what, cents, day, next }) => ({ name: what, cents, day, next })) }),
     })),
-    txs: data.txs.map(({ id, acc, date, cents, name, text, iban, own, cat, shares, gift }) => ({
-      id, acc, date, cents, name, text: text ?? '', ...(iban && { iban }), ...(own && { own }), ...(cat && { cat }),
+    txs: data.txs.map(({ id, acc, date, cents, name, text, iban, own, cat, shares, gift, early }) => ({
+      id, acc, date, cents, name, text: text ?? '', ...(iban && { iban }), ...(own && { own }), ...(cat && { cat }), ...(early && { early }),
       ...(shares && { shares: shares.map(({ who, cents: part }) => ({ who, cents: part })) }),
       ...(gift && { gift: { shop: gift.shop, value: gift.value } }),
     })),
