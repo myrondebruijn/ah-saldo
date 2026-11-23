@@ -6,7 +6,7 @@ import {
 import {
   AH, LARGE, START_CATS, US, addBalance, addFile, addStarter, balanceOn, byParty, cardsOn, cardsToAdd, catchUp, decodeText, dayRate, dueOn, emptyBank, ended, figures, fixedCosts,
   fixedSuggestions, forWhom, giftGuesses, giftsBought, giftsToFill, hasGap, heldShops, inCategory, monthOf, parseBank, payFrom, plannedOpen, readCsv, salaryBase,
-  addLinked, bought, deposits, holdings, invested, isTrade, readLinked, readOpenbank, ruleKey, shiftMonth, sorter, strayDeposits, tie,
+  addLinked, bought, deposits, holdings, invested, isTrade, readLinked, readOpenbank, ruleKey, shiftMonth, sortAll, sorter, strayDeposits, tie,
 } from './bank.js';
 import {
   api, b64u, fromB64u, inviteId, isCode, makePasskey, merge, openData, rand, sealData, tokenOf, unwrap, usePasskey, wrap,
@@ -2593,11 +2593,8 @@ async function askTx(tx) {
   if (cat === 'boodschappen' && tx.cents < 0 && shares.some((share) => share.who !== US)) tx.shares = shares;
   else delete tx.shares;
   if (all.checked) {
-    if (cat) bank.rules[key] = cat;
-    else delete bank.rules[key];
-    const same = bank.txs.filter((each) => ruleKey(each.name) === key);
-    for (const each of same) delete each.cat;
-    if (same.length > 1) toast(L(`${same.length} transacties van ${tx.name} ingedeeld.`, `${same.length} transactions from ${tx.name} sorted.`));
+    const same = sortAll(bank, tx, cat);
+    if (same > 1) toast(L(`${same} transacties van ${tx.name} ingedeeld.`, `${same} transactions from ${tx.name} sorted.`));
   } else if (cat) tx.cat = cat;
   else delete tx.cat;
   if (!$('txFixedRow').hidden && fixed.checked !== (bank.fixed[key] === true)) bank.fixed[key] = fixed.checked;
@@ -2862,6 +2859,11 @@ async function editCard(card, bought) {
   });
   if (answer !== 'ok') return false;
   const { number, code, expiry, start } = next;
+  // Another number on a card that is in the app is nearly always another card, and typing it over this one loses
+  // this card's number and code while its balance stays: so that is asked first.
+  if (card && card.number !== number && !await ask(L(`Het kaartnummer verandert. Kaart ${last4(card)} houdt zijn saldo van ${formatEuro(balance(card))} en zijn geschiedenis. Is het een andere kaart, annuleer dan en voeg hem toe met de plus.`,
+    `The card number changes. Card ${last4(card)} keeps its balance of ${formatEuro(balance(card))} and its history. If it is another card, cancel and add it with the plus.`),
+  L('Het is dezelfde kaart', 'It is the same card'), true)) return false;
   if (known) {
     known.tx = bought.id; // its balance and history stay as they are
     toast(L(`Kaart ${last4(known)} stond er al in en hoort nu bij deze aankoop.`, `Card ${last4(known)} was in the app already and now belongs to this purchase.`));

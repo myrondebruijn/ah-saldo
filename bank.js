@@ -358,6 +358,19 @@ export function sorter(bank) {
   };
 }
 
+// Sorts everything of `tx`'s counterparty: the rule for its name becomes `cat` ('' takes the rule away) and no line
+// keeps a choice of its own. Except a gift card payment that was sorted by itself: that choice says what that one
+// card was for (an AH card from before the app counts as groceries on the day it was bought), and a rule for the
+// shop that sells the cards must not undo it. Returns how many lines the counterparty has.
+export function sortAll(bank, tx, cat) {
+  const key = ruleKey(tx.name);
+  if (cat) bank.rules[key] = cat;
+  else delete bank.rules[key];
+  const same = bank.txs.filter((each) => ruleKey(each.name) === key);
+  for (const each of same) if (each === tx || !each.gift) delete each.cat;
+  return same.length;
+}
+
 // ---------- figures ----------
 
 export const monthOf = (date) => date.slice(0, 7);

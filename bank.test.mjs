@@ -441,6 +441,23 @@ test('groceries split between people: the household keeps its part, the rest is 
   bad([]);
 });
 
+test('sortAll: a rule for a name takes every own choice away, except a gift card that was sorted by itself', () => {
+  const wissel = (id, more) => tx({ id, name: 'Wissel Nederland B.V.', ...more });
+  const data = withTxs(
+    wissel('old', { cat: 'boodschappen', gift: { shop: 'Albert Heijn', value: 4500 } }), // an AH card from before the app: groceries
+    wissel('plain', { cat: 'winkelen' }),
+    wissel('new', { gift: { shop: 'Albert Heijn', value: 10000 } }),
+    tx({ id: 'other', name: 'Jumbo Dorp', cat: 'fun' }),
+  );
+  assert.equal(bank.sortAll(data, data.txs[2], 'cadeaukaarten'), 3);
+  assert.deepEqual(data.txs.map((each) => each.cat), ['boodschappen', undefined, undefined, 'fun']);
+  assert.equal(data.rules['wissel nederland b v'], 'cadeaukaarten');
+  bank.sortAll(data, data.txs[0], 'winkelen'); // the gift card itself, with everything else of that name: it follows the rule again
+  assert.deepEqual([data.txs[0].cat, data.rules['wissel nederland b v']], [undefined, 'winkelen']);
+  bank.sortAll(data, data.txs[1], '');
+  assert.equal('wissel nederland b v' in data.rules, false);
+});
+
 // a payment at the AH till at noon on a day of July 2026: what the cards paid, and the total as far as it is known
 const till = (id, day, cards, over = {}) => ({
   id, at: new Date(2026, 6, day, 12).toISOString(), store: 'AH', total: cards, cards, shares: [{ who: 'Wij', cents: cards }], ...over,
