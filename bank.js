@@ -228,8 +228,9 @@ export function readLinked(list) {
   const txs = [];
   for (const { iban, bank = 'Rabo', holder, txs: lines, balances } of list) {
     const booked = lines.filter((each) => each.status === 'BOOK'); // pending lines may still change
-    // Openbank numbers a day's lines only when the day is over. Until then a line has no place among the others, so
-    // it waits for a later fetch, and comes off the balance, which counts it already.
+    // Openbank gives its lines no number: Enable Banking makes one up from a line's place in its day, and a line
+    // booked today came without (seen 2026-11-23; presumably the day has to be over first). Such a line has no place
+    // among the others yet, so it waits for a later fetch, and comes off the balance, which counts it already.
     const early = bank === 'Openbank' ? booked.filter((line) => !line.entry_reference) : [];
     const done = booked.filter((line) => !early.includes(line));
     const stated = balances.find((each) => each.balance_type === 'ITBD') ?? balances.find((each) => each.balance_type === 'CLBD');
