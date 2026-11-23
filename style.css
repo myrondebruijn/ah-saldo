@@ -440,6 +440,36 @@ svg.pace { display: block; width: 100%; height: auto; margin-top: .625rem; overf
 /* the day a fixed cost is expected, as a small calendar page */
 .date-badge { flex: none; display: grid; place-content: center; width: 2.75rem; height: 2.875rem; margin: -.375rem 0; border-radius: .625rem; background: var(--bg); color: var(--label2); font-size: .6875rem; font-weight: 600; line-height: 1.1; text-align: center; text-transform: uppercase; }
 .date-badge b { color: var(--label); font-size: 1.0625rem; font-weight: 700; }
+.date-badge.paid { background: var(--plus-bg); color: var(--plus); }
+.date-badge.late { background: var(--soon-bg); color: var(--soon); }
+.date-badge.today { background: var(--tint); color: #fff; }
+.date-badge:is(.paid, .late, .today) b { color: inherit; }
+/* fixed costs: the month as a calendar, each payment on its day; green went out, orange was not charged on the day
+   it usually is, a blue ring is still to come, today in blue. The lists under it say the same in words. */
+.fixed-pair { margin-top: 1rem; }
+.fixed-bar { display: block; width: 100%; height: .625rem; margin-top: .875rem; }
+.fixed-bar .track { fill: var(--fill); }
+.fixed-bar .paid { fill: var(--plus); }
+.fixed-bar .late { fill: var(--soon); }
+.cal { margin-top: 1rem; padding: .875rem .625rem 1rem; border-radius: 1rem; background: var(--cell); }
+.cal ol { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); text-align: center; }
+.cal-head { color: var(--label2); font-size: .6875rem; font-weight: 600; text-transform: uppercase; }
+.cal-days { row-gap: .25rem; margin-top: .5rem; font-size: .9375rem; }
+.cal-days li { display: grid; justify-items: center; align-content: start; gap: .1875rem; min-height: 2.875rem; }
+.cal-days b { display: grid; place-items: center; width: 2.125rem; height: 2.125rem; border-radius: 50%; font-weight: 400; }
+.cal-days .weekend b { color: var(--label2); }
+.cal-days .today b { color: var(--link); font-weight: 700; }
+.cal-days .paid b { background: var(--plus); color: var(--cell); font-weight: 600; }
+.cal-days .due b { box-shadow: inset 0 0 0 2px var(--tint); color: var(--link); font-weight: 600; }
+.cal-days .today.due b { background: var(--tint); color: #fff; }
+.cal-days .late b { background: var(--soon-bg); box-shadow: inset 0 0 0 1.5px var(--soon); color: var(--soon); font-weight: 700; }
+.dots { display: flex; gap: 3px; height: 5px; }
+.dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--plus); }
+.dots .late { background: var(--soon); }
+.dots .due { background: var(--tint); }
+.key.k-paid { background: var(--plus); }
+.key.k-late { background: var(--soon-bg); box-shadow: inset 0 0 0 1.5px var(--soon); }
+.key.k-due { background: none; box-shadow: inset 0 0 0 2px var(--tint); }
 
 /* ---------- overview ---------- */
 /* when the bank links last brought news, under the title: a green dot, orange when a fetch failed */

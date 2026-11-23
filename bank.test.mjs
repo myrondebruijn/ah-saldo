@@ -464,11 +464,20 @@ test('fixed costs: suggested after three single monthly payments, then followed 
   data.fixed.sportclub = true;
   assert.deepEqual(bank.fixedSuggestions(data, '2026-10'), []);
   assert.deepEqual(bank.fixedCosts(data, '2026-10'), [
-    { key: 'verzekeraar', name: 'Verzekeraar', expected: 15000, paid: 15600 },
-    { key: 'sportclub', name: 'Sportclub', expected: 3000, paid: 0 },
+    { key: 'verzekeraar', name: 'Verzekeraar', expected: 15000, paid: 15600, day: 5, on: '2026-10-05' },
+    { key: 'sportclub', name: 'Sportclub', expected: 3000, paid: 0, day: 5, on: '' },
   ]);
   data.fixed.sportclub = false; // declined: neither followed nor suggested again
   assert.deepEqual(bank.fixedCosts(data, '2026-10').map((each) => each.key), ['verzekeraar']);
+});
+
+test('fixed costs: the usual day is the middle of the last three months, so one late month does not move it', () => {
+  const data = withTxs(...['2026-07-01', '2026-08-04', '2026-09-01', '2026-10-02'].map((date) => tx({ name: 'Huur', cents: -90000, date })));
+  data.fixed.huur = true;
+  assert.equal(bank.fixedCosts(data, '2026-10')[0].day, 1); // 1, 4 and 1: the 4th was late
+  assert.equal(bank.fixedCosts(data, '2026-11')[0].day, 2); // 4, 1 and 2
+  assert.equal(bank.fixedCosts(data, '2026-09')[0].day, 1); // two months: the earlier of the two
+  assert.equal(bank.fixedCosts(data, '2026-07')[0].day, 0); // nothing before it
 });
 
 test('dayRate: everyday payments set the pace; a large one, money back, a fixed cost and what is over do not', () => {

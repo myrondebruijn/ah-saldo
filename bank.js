@@ -576,7 +576,7 @@ export function catchUp(bank, today) {
 // A fixed cost is a counterparty that is paid every month. bank.fixed holds the user's answer per rule key:
 // true = it is one, false = it was suggested and declined.
 
-// per counterparty and month, the payments made: key -> { name, months: 'YYYY-MM' -> [cents paid, ...] }
+// per counterparty and month, the payments made, oldest first: key -> { name, months: 'YYYY-MM' -> [{ cents paid, date }, ...] }
 function payments(bank) {
   const catOf = sorter(bank);
   const kinds = new Map(bank.cats.map((cat) => [cat.id, cat.kind]));
@@ -586,13 +586,13 @@ function payments(bank) {
     const key = ruleKey(tx.name);
     const party = parties.get(key) ?? { name: tx.name, months: new Map() };
     party.name = tx.name;
-    party.months.set(monthOf(tx.date), [...(party.months.get(monthOf(tx.date)) ?? []), -tx.cents]);
+    party.months.set(monthOf(tx.date), [...(party.months.get(monthOf(tx.date)) ?? []), { cents: -tx.cents, date: tx.date }]);
     parties.set(key, party);
   }
   return parties;
 }
 
-const total = (list) => (list ?? []).reduce((sum, cents) => sum + cents, 0);
+const total = (list) => (list ?? []).reduce((sum, each) => sum + each.cents, 0);
 
 // Counterparties that were paid exactly once in each of the three months before `month`, and that the user
 // has not decided on yet: [{ key, name, cents }], the largest first.
@@ -604,14 +604,20 @@ export function fixedSuggestions(bank, month) {
     .sort((a, b) => b.cents - a.cents);
 }
 
-// The fixed costs in `month`: [{ key, name, expected, paid }], the largest first. `expected` is what the
+// The fixed costs in `month`: [{ key, name, expected, paid, day, on }], the largest first. `expected` is what the
 // last earlier month with a payment cost (0 when there is none); `paid` is this month's, 0 while it is still to come.
+// `day` is the day of the month it usually goes out: the middle one of the last three earlier months, so one late
+// month does not move it (0 without an earlier month); `on` is the date it went out this month, '' while it has not.
 export function fixedCosts(bank, month) {
   const parties = payments(bank);
   return Object.keys(bank.fixed).filter((key) => bank.fixed[key] && parties.has(key)).map((key) => {
     const { name, months } = parties.get(key);
-    const earlier = [...months.keys()].filter((each) => each < month).sort().at(-1);
-    return { key, name, expected: total(months.get(earlier)), paid: total(months.get(month)) };
+    const earlier = [...months.keys()].filter((each) => each < month).sort();
+    const days = earlier.slice(-3).map((each) => Number(months.get(each)[0].date.slice(8))).sort((a, b) => a - b);
+    return {
+      key, name, expected: total(months.get(earlier.at(-1))), paid: total(months.get(month)),
+      day: days[Math.floor((days.length - 1) / 2)] ?? 0, on: months.get(month)?.[0].date ?? '',
+    };
   }).sort((a, b) => (b.expected || b.paid) - (a.expected || a.paid));
 }
 

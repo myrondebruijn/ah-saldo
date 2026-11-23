@@ -888,7 +888,7 @@ const openCount = () => inCategory(bank, '', '', '9999').length;
 
 // "9 van 12 betaald", for the fixed costs of a month, with what they paid and what is still expected
 function fixedSummary(month) {
-  const costs = fixedCosts(bank, month);
+  const costs = fixedCosts(bank, month).filter((cost) => cost.paid || cost.expected); // one that only started later is no cost of this month
   const paid = costs.filter((cost) => cost.paid).length;
   return {
     costs, text: L(`${paid} van ${costs.length} betaald`, `${paid} of ${costs.length} paid`), total: costs.reduce((sum, cost) => sum + cost.paid, 0),
@@ -897,18 +897,23 @@ function fixedSummary(month) {
 }
 // the newest payment to a counterparty, by its rule key
 const lastPaid = (key) => bank.txs.filter((tx) => ruleKey(tx.name) === key).sort((a, b) => b.date.localeCompare(a.date))[0];
+// the date in `month` a fixed cost usually goes out; a 31st is the last day of a shorter month
+const expectedOn = (cost, month) => `${month}-${String(Math.min(cost.day, daysIn(month))).padStart(2, '0')}`;
 
 // What is still to come in `month` while it runs (`open`), and what it will probably have cost at its end. `due`: the
-// fixed costs not paid yet, each on the day of the month it was paid the last time, and the payments the user
-// planned; a plan for a later month is listed, but only this month's (`coming`) count. `sure` is what was `spent`
-// plus what is still to come; `ahead` adds `rate` cents of everyday spending for every day that is left.
+// fixed costs not paid yet, each on the day of the month it usually goes out (`late` once that day is past and
+// it was not charged), and the payments the user planned; a plan for a later month is listed, but only this
+// month's (`coming`) count. `sure` is what was `spent` plus what is still to come; `ahead` adds `rate` cents of
+// everyday spending for every day that is left.
 function outlook(month, spent, open) {
   const fixed = fixedSummary(month);
   const catOf = sorter(bank);
   const days = daysIn(month);
+  const today = isoDate();
   const due = !open ? [] : [
-    ...fixed.costs.filter((cost) => !cost.paid && cost.expected).map((cost) => ({ cost, tx: lastPaid(cost.key) })).map(({ cost, tx }) => ({
-      date: `${month}-${String(Math.min(Number(tx.date.slice(8)), days)).padStart(2, '0')}`, name: cost.name, note: catName(catOf(tx)), cents: cost.expected })),
+    ...fixed.costs.filter((cost) => !cost.paid && cost.expected).map((cost) => ({ cost, date: expectedOn(cost, month) })).map(({ cost, date }) => ({
+      date, name: cost.name, cents: cost.expected, late: date < today,
+      note: date < today ? L('Nog niet afgeschreven', 'Not charged yet') : catName(catOf(lastPaid(cost.key))) })),
     ...plannedOpen(bank, isoDate()).map((plan) => ({ ...plan, note: L('Gepland', 'Planned') })),
   ].sort((a, b) => a.date.localeCompare(b.date));
   const coming = due.filter((each) => monthOf(each.date) === month);
@@ -920,7 +925,7 @@ function outlook(month, spent, open) {
 
 // a payment still to come, on a small calendar page; a tap on a planned one takes it off again
 function dueRow(each) {
-  const row = `<span class="date-badge"><b>${Number(each.date.slice(8))}</b>${monthShort(monthOf(each.date))}</span>
+  const row = `<span class="date-badge${each.late ? ' late' : ''}"><b>${Number(each.date.slice(8))}</b>${monthShort(monthOf(each.date))}</span>
     <span class="row-main">${esc(each.name)} <small>${each.note}</small></span>
     <span class="amount quiet">${formatEuro(each.cents)}</span>`;
   return each.id ? `<li><button class="row" data-action="unplan" data-id="${esc(each.id)}">${row}</button></li>` : `<li class="row">${row}</li>`;
@@ -1390,27 +1395,86 @@ function categoryScreen(id) {
   };
 }
 
+// 'ma', 'di' … in Dutch, 'Mon', 'Tue' … in English
+const weekday = (date) => new Date(`${date}T12:00:00Z`).toLocaleDateString(LOCALE, { weekday: 'short', timeZone: 'UTC' }).replace('.', '');
+
+// The fixed costs of a month as a calendar, each on the day it went out or usually goes out, and then in words:
+// what was not charged on the day it usually is and is still open, what is still to come week by week, and what
+// went out. When a bank charges later (a weekend, a holiday) nothing is guessed: it stays open until it is there.
 function fixedScreen() {
-  const { costs, total, waiting } = fixedSummary(view.month);
+  const month = view.month;
+  const { costs, total, waiting } = fixedSummary(month);
+  const today = isoDate();
+  const open = month === thisMonth();
   const catOf = sorter(bank);
   const suggestions = fixedSuggestions(bank, thisMonth());
-  const status = (cost) => (!cost.paid ? L('Nog niet betaald', 'Not paid yet')
-    : cost.expected && cost.paid !== cost.expected ? L(`Betaald · de keer ervoor ${formatEuro(cost.expected)}`, `Paid · last time ${formatEuro(cost.expected)}`)
-    : L('Betaald', 'Paid'));
+  const items = costs.map((cost) => ({
+    ...cost, date: cost.on || expectedOn(cost, month), state: cost.on ? 'paid' : expectedOn(cost, month) < today ? 'late' : 'due',
+    tx: cost.on ? bank.txs.find((tx) => tx.date === cost.on && tx.cents < 0 && ruleKey(tx.name) === cost.key) : lastPaid(cost.key),
+  })).sort((a, b) => a.date.localeCompare(b.date));
+  const [paid, late, due] = ['paid', 'late', 'due'].map((state) => items.filter((item) => item.state === state));
+  const sum = (list) => list.reduce((cents, item) => cents + (item.paid || item.expected), 0);
+  const note = (item) => {
+    const cat = catName(catOf(item.tx));
+    if (item.state === 'paid') {
+      return `${L('Betaald', 'Paid')}${item.expected && item.paid !== item.expected ? ` · ${L('de keer ervoor', 'last time')} ${formatEuro(item.expected)}` : ''} · ${cat}`;
+    }
+    if (item.state === 'late') {
+      return open ? L(`Verwacht op ${dayShort(item.date)}, staat nog open`, `Expected on ${dayShort(item.date)}, still pending`)
+        : L(`Verwacht op ${dayShort(item.date)}`, `Expected on ${dayShort(item.date)}`);
+    }
+    const days = daysLeft(item.date, today);
+    return `${days === 0 ? L('Vandaag verwacht', 'Expected today') : days === 1 ? L('Morgen', 'Tomorrow') : L(`Over ${days} dagen`, `In ${days} days`)} · ${cat}`;
+  };
+  const row = (item) => `
+    <li><button class="row" data-action="tx" data-id="${esc(item.tx.id)}">
+      <span class="date-badge ${item.state}${item.state === 'due' && item.date === today ? ' today' : ''}"><b>${Number(item.date.slice(8))}</b>${weekday(item.date)}</span>
+      <span class="row-main">${esc(item.name)} <small>${note(item)}</small></span>
+      <span class="amount${item.state === 'paid' ? '' : ' quiet'}">${formatEuro(item.paid || item.expected)}</span>
+    </button></li>`;
+  const list = (title, each) => (each.length ? `
+    <h2 class="section split-head"><span>${title}</span><span>${formatEuro(sum(each))}</span></h2>
+    <ul class="group dated">${each.map(row).join('')}</ul>` : '');
+  // what is still to come, by week from Monday; the rest of the month after next week is one group
+  const sinceMonday = (new Date(`${today}T12:00:00Z`).getUTCDay() + 6) % 7;
+  const week = (item) => Math.min(2, Math.floor((daysLeft(item.date, today) + sinceMonday) / 7));
+  const weeks = [L('Deze week', 'This week'), L('Volgende week', 'Next week'), L('Later deze maand', 'Later this month')]
+    .map((title, index) => list(title, due.filter((item) => week(item) === index))).join('');
+  // the calendar, Monday first; a day shows the state that needs the most attention, a dot per payment
+  const first = (new Date(`${month}-01T12:00:00Z`).getUTCDay() + 6) % 7;
+  const days = Array.from({ length: daysIn(month) }, (unused, index) => {
+    const date = `${month}-${String(index + 1).padStart(2, '0')}`;
+    const here = items.filter((item) => item.date === date);
+    const state = ['late', 'due', 'paid'].find((each) => here.some((item) => item.state === each));
+    const kind = [state, (first + index) % 7 >= 5 && 'weekend', date === today && 'today'].filter(Boolean).join(' ');
+    return `<li${kind ? ` class="${kind}"` : ''}><b>${index + 1}</b><span class="dots">${here.map((item) => `<i class="${item.state}"></i>`).join('')}</span></li>`;
+  });
+  const whole = total + waiting;
   return {
     html: `
       <header class="navbar">${backButton()}<h1>${L('Vaste lasten', 'Fixed costs')}</h1><span></span></header>
-      <section class="summary period">
+      <section class="summary">
         ${monthStepper()}
-        <p class="total">${formatEuro(total)}</p>
-        <p class="footnote center">${L('betaald', 'paid')}${waiting ? ` · ${L('nog verwacht', 'still expected')} ${formatEuro(waiting)}` : ''}</p>
+        ${costs.length ? `
+          <div class="pair fixed-pair">
+            <div><p class="tile-total">${formatEuro(total)}</p><p class="footnote">${L('Betaald', 'Paid')} · ${paid.length}</p></div>
+            ${waiting ? `<div><p class="tile-total">${formatEuro(waiting)}</p>
+              <p class="footnote">${open ? L('Nog te gaan', 'Still to go') : L('Niet afgeschreven', 'Not charged')} · ${late.length + due.length}</p></div>` : ''}
+          </div>
+          <svg class="fixed-bar" aria-hidden="true"><rect class="track" width="100%" height="100%" rx="4"/>
+            <rect class="late" width="${((total + sum(late)) / whole * 100).toFixed(1)}%" height="100%" rx="4"/>
+            <rect class="paid" width="${(total / whole * 100).toFixed(1)}%" height="100%" rx="4"/></svg>` : ''}
       </section>
       ${costs.length ? `
-        <ul class="group">${costs.map((cost) => `
-          <li><button class="row" data-action="tx" data-id="${esc(lastPaid(cost.key).id)}">
-            <span class="row-main">${esc(cost.name)} <small>${status(cost)} · ${catName(catOf(lastPaid(cost.key)))}</small></span>
-            <span class="amount${cost.paid ? '' : ' quiet'}">${formatEuro(cost.paid || cost.expected)}</span>
-          </button></li>`).join('')}</ul>`
+        <div class="cal" aria-hidden="true">
+          <ol class="cal-head">${Array.from({ length: 7 }, (unused, index) => `<li>${weekday(`2024-01-0${index + 1}`)}</li>`).join('')}</ol>
+          <ol class="cal-days">${'<li></li>'.repeat(first)}${days.join('')}</ol>
+          <p class="legend"><span><i class="key k-paid"></i>${L('Betaald', 'Paid')}</span><span><i class="key k-late"></i>${L('Niet afgeschreven', 'Not charged')}</span>${
+            open ? `<span><i class="key k-due"></i>${L('Komt nog', 'Still to come')}</span>` : ''}</p>
+        </div>
+        ${list(open ? L('Nog niet afgeschreven', 'Not charged yet') : L('Niet afgeschreven', 'Not charged'), late)}
+        ${weeks}
+        ${list(L('Betaald', 'Paid'), paid)}`
       : `<p class="group-note">${L('Een vaste last is iets dat je elke maand betaalt. Kies hieronder Ja bij een voorstel, of zet bij een transactie de schakelaar Vaste last aan.',
         'A fixed cost is something you pay every month. Choose Yes for a suggestion below, or switch on Fixed cost on a transaction.')}</p>`}
       ${suggestions.length ? `
