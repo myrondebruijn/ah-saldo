@@ -1521,6 +1521,14 @@ function stepper(name, atEnd) {
     </div>`;
 }
 const monthStepper = () => stepper(monthName(view.month), view.month >= thisMonth());
+// Insight and a category show the month on screen or, with Jaar chosen, its whole year
+const periodRange = () => (view.unit === 'year' ? [`${yearOf(view.month)}-01-01`, `${Number(yearOf(view.month)) + 1}-01-01`] : monthRange(view.month));
+const periodStepper = () => (view.unit === 'year' ? stepper(yearOf(view.month), yearOf(view.month) >= yearOf(thisMonth())) : monthStepper());
+const unitSwitch = () => `
+  <div class="segments" role="group" aria-label="${L('Periode', 'Period')}">
+    <button data-action="unit" data-id="month" aria-pressed="${view.unit !== 'year'}">${L('Maand', 'Month')}</button>
+    <button data-action="unit" data-id="year" aria-pressed="${view.unit === 'year'}">${L('Jaar', 'Year')}</button>
+  </div>`;
 
 function potsScreen() {
   const now = monthFigures(view.month);
@@ -1558,12 +1566,13 @@ function potsScreen() {
 // A category and the fixed costs are reached from several tabs: back names the one the owner came from.
 const backButton = () => `<button class="back" data-action="back">${icon('back')}${TABS.find(([id]) => id === tab)[3]}</button>`;
 
-// One category in one month: what it cost, the months before, who was paid, and every transaction.
+// One category in one month or year: what it cost, the months before (or of that year), who was paid, and every transaction.
 // The id 'open' stands for everything that still has to be sorted, of all months together.
 function categoryScreen(id) {
   const cat = catById(id);
   if (!cat && id !== 'open') return potsScreen();
-  const [from, to] = cat ? monthRange(view.month) : ['', '9999'];
+  const yearly = cat && view.unit === 'year';
+  const [from, to] = cat ? periodRange() : ['', '9999'];
   const txs = inCategory(bank, cat?.id ?? '', from, to);
   const catOf = sorter(bank);
   const sign = cat?.kind === 'in' ? 1 : -1; // spending is shown as a positive amount
@@ -1580,12 +1589,13 @@ function categoryScreen(id) {
   const inTill = new Set(tills.map((purchase) => purchase.tx));
   const fromCards = !cat ? 0 : forOthers ? who.reduce((sum, [, cents]) => sum + cents, 0)
     : (figures({ ...bank, txs: [] }, state.purchases, from, to).byCat.get(cat.id) ?? 0) + txs.reduce((sum, tx) => sum - (inTill.has(tx.id) ? tx.cents : 0), 0);
-  const total = cat?.kind === 'none' ? txs.reduce((sum, tx) => sum + tx.cents, 0) : (monthFigures(view.month).byCat.get(cat?.id ?? '') ?? 0);
+  const total = !cat ? 0 : cat.kind === 'none' ? txs.reduce((sum, tx) => sum + tx.cents, 0) : (figures(bank, state.purchases, from, to).byCat.get(cat.id) ?? 0);
   const parties = byParty(txs.filter((tx) => !inTill.has(tx.id)));
   // the size of a bar: what was spent (or, for income, received); money the other way gets none. Unsorted money counts either way.
   const size = (party) => (cat && cat.kind !== 'none' ? Math.max(0, sign * party.cents) : Math.abs(party.cents));
   const whole = Math.max(1, fromCards + parties.reduce((sum, party) => sum + size(party), 0)); // the bars are shares of this
-  const months = Array.from({ length: 6 }, (unused, index) => shiftMonth(view.month >= shiftMonth(thisMonth(), -5) ? thisMonth() : view.month, index - 5));
+  const months = yearly ? chartMonths() : Array.from({ length: 6 }, (unused, index) => shiftMonth(view.month >= shiftMonth(thisMonth(), -5) ? thisMonth() : view.month, index - 5));
+  const chosen = yearly ? '' : view.month; // in a year no month stands out; a tap on one opens that month
   const gifts = cat?.id === 'cadeaukaarten'; // everything here was paid to the shop that sells the cards: the shops the cards are for say more
   // a card sorted into another category still counts in what the cards bought and saved, so it is listed here too, with its category
   const elsewhere = gifts ? bank.txs.filter((tx) => tx.gift && tx.date >= since && tx.date < to && catOf(tx) !== cat.id) : [];
@@ -1604,17 +1614,18 @@ function categoryScreen(id) {
         ${cat ? `<button class="text-button" data-action="editCat" data-id="${cat.id}">${L('Bewerken', 'Edit')}</button>` : '<span></span>'}
       </header>
       ${cat ? `
+        ${unitSwitch()}
         <section class="summary period">
-          ${monthStepper()}
+          ${periodStepper()}
           <p class="total">${cat.kind === 'none' ? signed(total) : formatEuro(total)}</p>
-          ${cat.budget ? `<ul class="plain">${potRow(cat, total, view.month).replace('<a class="row meter-row" href', '<a class="row meter-row bare" href')}</ul>` : ''}
-          ${gifts ? flowChart(months, view.month, (month) => {
+          ${cat.budget && !yearly ? `<ul class="plain">${potRow(cat, total, view.month).replace('<a class="row meter-row" href', '<a class="row meter-row bare" href')}</ul>` : ''}
+          ${gifts ? flowChart(months, chosen, (month) => {
             const sum = giftSum(giftsBought(bank, ...monthRange(month)));
             return [sum.value - sum.paid, sum.value];
           }, [L('Bespaard', 'Saved'), L('Gekocht', 'Bought')])
           : cat.kind === 'none' ? '' : columnChart(months.map((month) => ({
-            id: month, name: monthName(month), short: monthShort(month), total: Math.max(0, monthFigures(month).byCat.get(cat.id) ?? 0), chosen: month === view.month,
-          })), 'pickMonth')}
+            id: month, name: monthName(month), short: monthShort(month), total: Math.max(0, monthFigures(month).byCat.get(cat.id) ?? 0), chosen: month === chosen,
+          })), 'pickMonth', yearly ? 'flow' : '')}
         </section>`
       : `<p class="group-note">${L('Tik op een naam en kies een categorie. Alles van die naam gaat dan mee, ook wat later binnenkomt.',
         'Tap a name and choose a category. Everything from that name follows, including what comes in later.')}</p>`}
@@ -1645,7 +1656,7 @@ function categoryScreen(id) {
           'Was something, or part of it, for someone else? Tap the transaction and choose For whom. What you paid at AH with gift cards and debit card is one purchase here.')}</p>` : ''}
         ${gifts ? `<p class="group-note">${L(`Een kaart van ${AH}, of van een winkel waarvan je het saldo bijhoudt, telt hier niet mee: het geld telt als uitgave zodra je ermee betaalt. Een kaart die je in een andere categorie zet, telt daar als uitgave; wat hij bespaarde blijft hierboven meetellen.`,
           `A card for ${AH}, or for a shop whose balance you keep, does not count here: the money counts as spending once you pay with it. A card you sort into another category counts as spending there; what it saved stays in the figures above.`)}</p>` : ''}`
-      : blank(cat ? L('Niets in deze maand', 'Nothing this month') : L('Alles is ingedeeld', 'Everything is sorted'))}`,
+      : blank(!cat ? L('Alles is ingedeeld', 'Everything is sorted') : yearly ? L('Niets in dit jaar', 'Nothing this year') : L('Niets in deze maand', 'Nothing this month'))}`,
   };
 }
 
@@ -1813,8 +1824,7 @@ function paceChart(month, day, coming, rate, past) {
 
 function insightScreen() {
   const yearly = view.unit === 'year';
-  const year = yearOf(view.month);
-  const [from, to] = yearly ? [`${year}-01-01`, `${Number(year) + 1}-01-01`] : monthRange(view.month);
+  const [from, to] = periodRange();
   const now = figures(bank, state.purchases, from, to);
   const left = now.income - now.spending;
   const short = left < 0 && to <= isoDate(); // only a period that is over can end short
@@ -1870,12 +1880,9 @@ function insightScreen() {
   return {
     html: `
       <header class="large-title"><h1>${L('Inzicht', 'Insight')}</h1></header>
-      <div class="segments" role="group" aria-label="${L('Periode', 'Period')}">
-        <button data-action="unit" data-id="month" aria-pressed="${!yearly}">${L('Maand', 'Month')}</button>
-        <button data-action="unit" data-id="year" aria-pressed="${yearly}">${L('Jaar', 'Year')}</button>
-      </div>
+      ${unitSwitch()}
       <section class="summary period">
-        ${yearly ? stepper(year, year >= yearOf(thisMonth())) : monthStepper()}
+        ${periodStepper()}
         <dl class="trio">
           <div><dt>${L('In', 'In')}</dt><dd>${formatEuro(now.income)}</dd></div>
           <div><dt>${running ? L('Uit tot nu', 'Out so far') : L('Uit', 'Out')}</dt><dd>${formatEuro(now.spending)}</dd></div>
@@ -1975,7 +1982,7 @@ function insightScreen() {
           <li class="row"><span class="row-main">${L('Cadeaukaarten', 'Gift cards')}</span>
             <span class="amount">${formatEuro(cardsOn(state.cards, worthMonth === thisMonth() ? '9999' : `${worthMonth}-31`))}</span></li>
         </ul>` : ''}
-      ${investInsight(chartMonths(), yearly ? year : view.month)}`,
+      ${investInsight(chartMonths(), yearly ? yearOf(view.month) : view.month)}`,
   };
 }
 
@@ -2504,7 +2511,9 @@ function render() {
   else paying ??= { queue: useOrder(), steps: [] };
   const atTill = Boolean(card || paying?.queue.length); // the screens a till scanner reads stay white
   const install = needsInstall(navigator.userAgent, standalone);
-  tab = TAB_OF[route()] ?? tab;
+  const next = TAB_OF[route()] ?? tab;
+  if (next !== tab) view.unit = 'month'; // a year chosen on Insight stays with Insight and what is opened from it
+  tab = next;
   const screen = install ? installScreen()
     : sharing && !onServer ? waitScreen()
     : card ? cardScreen(card)
@@ -3404,7 +3413,7 @@ const actions = {
   fixedNo(card, button) { bank.fixed[button.dataset.id] = false; saveBank(); },
   // which month (or year) the pots, a category, the fixed costs and the insight screen show
   monthStep(card, button) {
-    const by = Number(button.dataset.by) * (route() === 'inzicht' && view.unit === 'year' ? 12 : 1);
+    const by = Number(button.dataset.by) * (['inzicht', 'categorie'].includes(route()) && view.unit === 'year' ? 12 : 1);
     const month = shiftMonth(view.month, by);
     Object.assign(view, { month: month > thisMonth() ? thisMonth() : month, worth: '' });
     redraw(`[data-by="${button.dataset.by}"]`);
