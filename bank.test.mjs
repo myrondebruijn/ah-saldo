@@ -771,3 +771,32 @@ test('what is left in the pots: an overspent pot counts as 0 and a fixed cost to
   assert.equal(bank.potsLeft(pots, spent, new Map([['wonen', 30000]])), 8740); // more to come than is left: the pot adds nothing
   assert.equal(bank.potsLeft(pots, new Map()), 155000); // the 1st: every pot whole
 });
+
+test('a savings goal: what each month saved, the plan, and in which month each amount is reached', () => {
+  const goal = { name: 'Huis', monthly: 420000, start: '2026-11', steps: [{ cents: 4000000, name: 'Kijken' }, { cents: 16000000, name: 'Kopen' }] };
+  const ends = { '2026-05': 1400000, '2026-06': 1650000, '2026-07': 690000, '2026-08': 620000, '2026-09': 436000, '2026-10': 424800, '2026-11': 68000 };
+  const { base, plan, list, steps } = bank.goalMonths(goal, (month) => ends[month], '2026-11', '2026-06');
+  assert.equal(base, 424800); // the end of October, the last full month
+  assert.equal(plan, 844800);
+  assert.deepEqual(list.map((each) => [each.month, each.kind]), [['2026-07', 'before'], ['2026-08', 'before'], ['2026-09', 'before'], ['2026-10', 'before'],
+    ['2026-11', 'now'], ['2026-12', 'next'], ['2027-01', 'next'], ['2027-02', 'next']]);
+  assert.equal(list[0].saved, 690000 - 1650000);
+  assert.equal(list[4].saved, 68000 - 424800); // so far: the salaries are not in yet
+  assert.equal(list[5].worth, 424800 + 2 * 420000); // the plan: two months after October
+  assert.deepEqual(steps.map((step) => step.month), ['2027-07', '2029-12']);
+  // younger data shows fewer months before; an amount there already is reached
+  const young = bank.goalMonths({ ...goal, start: '2026-10', steps: [{ cents: 400000, name: 'Buffer' }] }, (month) => ends[month], '2026-11', '2026-09');
+  assert.deepEqual(young.list.map((each) => each.kind), ['before', 'done', 'now', 'next', 'next', 'next']);
+  assert.equal(young.steps[0].month, '');
+});
+
+test('a savings goal is saved only in its own shape', () => {
+  const data = JSON.parse(JSON.stringify(loaded()));
+  const goal = { name: 'Huis', monthly: 420000, start: '2026-11', steps: [{ cents: 4000000, name: 'Kijken' }, { cents: 16000000, name: 'Kopen' }] };
+  assert.deepEqual(bank.parseBank({ ...data, goal: { ...goal, extra: 1 } }).goal, goal);
+  assert.equal(bank.parseBank(data).goal, undefined);
+  for (const wrong of [{ ...goal, monthly: 0 }, { ...goal, start: '2026-13' }, { ...goal, steps: [] }, { ...goal, steps: [...goal.steps].reverse() },
+    { ...goal, steps: [{ cents: 1, name: 'a' }, { cents: 2, name: 'b' }, { cents: 3, name: 'c' }, { cents: 4, name: 'd' }] }]) {
+    assert.throws(() => bank.parseBank({ ...data, goal: wrong }));
+  }
+});

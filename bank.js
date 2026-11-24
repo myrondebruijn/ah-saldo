@@ -774,6 +774,30 @@ export function salaryBase(bank, purchases, month) {
 export const potsLeft = (pots, spent, held = new Map()) =>
   pots.reduce((sum, cat) => sum + Math.max(0, cat.budget - (spent.get(cat.id) ?? 0) - (held.get(cat.id) ?? 0)), 0);
 
+// ---------- a savings goal ----------
+// bank.goal = { name, monthly, start, steps: [{ cents, name }] }: save `monthly` cents every month from the month
+// `start` on, up to the amounts of `steps`, the lowest first. What a month saved is how much the net worth grew in it.
+
+export const monthsFrom = (from, to) => (Number(to.slice(0, 4)) - Number(from.slice(0, 4))) * 12 + Number(to.slice(5)) - Number(from.slice(5));
+
+// The months of a goal as its card shows them, around `month`, the running one: the four before it (none before
+// the data starts, `first`), `month` itself and the three after. `worthAt(m)` is the net worth at the end of
+// month m, now for the running one. Each month is 'before' the goal's start, 'done', 'now' or 'next'; a next one has
+// no worth yet, so it holds the plan: the end of the last full month (`base`) plus `monthly` for every month since.
+// `plan` is that for `month`. Each step says in which month its amount is reached ('' when it is already) if every
+// month from now on saves `monthly`; it counts from `base`, so the dates move with each month that saves more or less.
+export function goalMonths(goal, worthAt, month, first) {
+  const last = shiftMonth(month, -1);
+  const base = worthAt(last);
+  const list = [-4, -3, -2, -1, 0, 1, 2, 3].map((by) => shiftMonth(month, by)).filter((each) => each >= first || each >= month).map((each) => {
+    if (each > month) return { month: each, kind: 'next', saved: goal.monthly, worth: base + goal.monthly * monthsFrom(last, each) };
+    const worth = worthAt(each);
+    return { month: each, kind: each === month ? 'now' : each < goal.start ? 'before' : 'done', saved: worth - worthAt(shiftMonth(each, -1)), worth };
+  });
+  const steps = goal.steps.map((step) => ({ ...step, month: base >= step.cents ? '' : shiftMonth(last, Math.ceil((step.cents - base) / goal.monthly)) }));
+  return { base, plan: base + goal.monthly, list, steps };
+}
+
 // ---------- planned payments ----------
 // A payment the user knows is coming: bank.planned = [{ id, name, cents, date, since }]. `cents` is what it will
 // cost, `date` the day it is expected and `since` the day it was planned. It belongs to the month of its date.
@@ -887,6 +911,10 @@ const isSaved = (account) => isAccount(account) && (account.through === '' || is
 const isCat = (cat) => isId(cat?.id) && isName(cat.name) && KINDS.includes(cat.kind)
   && (cat.budget === undefined || (Number.isInteger(cat.budget) && cat.budget > 0));
 const isPlan = (plan) => isId(plan?.id) && isName(plan.name) && Number.isInteger(plan.cents) && plan.cents > 0 && isDate(plan.date) && isDate(plan.since);
+const isStep = (step, index, steps) => isName(step?.name) && Number.isInteger(step.cents) && step.cents > 0 && (index === 0 || step.cents > steps[index - 1].cents);
+export const isGoal = (goal) => isName(goal?.name) && Number.isInteger(goal.monthly) && goal.monthly > 0
+  && typeof goal.start === 'string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(goal.start)
+  && Array.isArray(goal.steps) && goal.steps.length > 0 && goal.steps.length <= 3 && goal.steps.every(isStep);
 export const isTrade = (trade) => isId(trade?.id) && typeof trade.stock === 'string' && /^[\w.=^-]{1,20}$/.test(trade.stock)
   && isText(trade.name, 60) && trade.name.length > 0 && isDate(trade.date)
   && Number.isFinite(trade.qty) && trade.qty !== 0 && Math.abs(trade.qty) <= 1e9
@@ -903,7 +931,8 @@ export function parseBank(data) {
     && isRules(data.rules, isId) && isRules(data.fixed, (value) => typeof value === 'boolean')
     && (data.since === '' || isDate(data.since))
     && (data.planned === undefined || (Array.isArray(data.planned) && data.planned.every(isPlan))) // data saved before there were plans has none
-    && (data.trades === undefined || (Array.isArray(data.trades) && data.trades.every(isTrade))); // nor purchases
+    && (data.trades === undefined || (Array.isArray(data.trades) && data.trades.every(isTrade))) // nor purchases
+    && (data.goal === undefined || isGoal(data.goal)); // nor a savings goal
   if (!ok) throw new Error('invalid bank data');
   return {
     accounts: data.accounts.map(({ id, name, bank, balance, holder, card, through, uploaded, shop, monthly = [] }) => ({
@@ -923,6 +952,8 @@ export function parseBank(data) {
     planned: (data.planned ?? []).map(({ id, name, cents, date, since }) => ({ id, name, cents, date, since })),
     // (for one day, 23 November 2026, there was a list `stocks` of funds without what they cost: it is not read any more)
     trades: (data.trades ?? []).map(({ id, stock, name, date, qty, cents }) => ({ id, stock, name, date, qty, cents })),
+    ...(data.goal && { goal: { name: data.goal.name, monthly: data.goal.monthly, start: data.goal.start,
+      steps: data.goal.steps.map(({ cents, name }) => ({ cents, name })) } }),
   };
 }
 

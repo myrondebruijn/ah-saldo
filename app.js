@@ -1,12 +1,12 @@
 import {
   addCards, balance, cleanDigits, code128, daysLeft, expiryState, formatEuro as euroIn, groupNumber, isDate, isName, isoDate, isoWeek,
-  needsInstall, parseEuro, parseState, periodStart, settle, shareOut, shiftPeriod, sortCards, summarize,
+  needsInstall, parseBig, parseEuro, parseState, periodStart, settle, shareOut, shiftPeriod, sortCards, summarize,
   validCode, validNumber,
 } from './logic.js';
 import {
   AH, LARGE, START_CATS, US, addBalance, addFile, addStarter, balanceOn, byParty, cardsOn, cardsToAdd, catchUp, decodeText, dayRate, dueOn, emptyBank, ended, figures, fixedCosts,
   fixedSuggestions, forWhom, giftGuesses, giftsBought, giftsToFill, hasGap, heldShops, inCategory, monthOf, onBalance, parseBank, payFrom, plannedOpen, potsLeft, readCsv, salaryBase,
-  addLinked, bought, deposits, holdings, invested, isTrade, readLinked, readOpenbank, ruleKey, sellsCards, shiftMonth, sortAll, sorter, strayDeposits, tie,
+  addLinked, bought, deposits, goalMonths, holdings, invested, isGoal, isTrade, monthsFrom, readLinked, readOpenbank, ruleKey, sellsCards, shiftMonth, sortAll, sorter, strayDeposits, tie,
 } from './bank.js';
 import {
   api, b64u, fromB64u, inviteId, isCode, makePasskey, merge, openData, rand, sealData, tokenOf, unwrap, usePasskey, wrap,
@@ -40,7 +40,8 @@ const STALE = 30; // days after which the overview asks for new bank files
 // older Kassa read but not write (worker/index.js, PUT /vault), until that phone has the new one.
 // 2: the phones keep no copy; an older Kassa, which syncs a copy it keeps, may not write any more
 // 3: a card knows the payment that bought it, a till payment the bank line of its pin part
-const DATA = 4; // 4: a payment keeps what gift card it bought in any category; an older Kassa took that off when it was sorted elsewhere
+// 4: a payment keeps what gift card it bought in any category; an older Kassa took that off when it was sorted elsewhere
+const DATA = 5; // 5: a savings goal
 const START_IDS = new Set(START_CATS.map((cat) => cat.id));
 const KIND_ORDER = ['out', 'in', 'none'];
 
@@ -564,8 +565,8 @@ const monthFigures = (month) => figures(bank, state.purchases, ...monthRange(mon
 const cardTotal = () => state.cards.reduce((sum, card) => sum + Math.max(balance(card), 0), 0);
 
 // What the screens of the bank side are looking at. It lasts until the app is closed.
-// `worth` is a month tapped on the net worth line; '' follows the month on screen.
-const view = { month: thisMonth(), unit: 'month', worth: '', query: '', cat: 'all', acc: 'all', rows: 60 };
+// `worth` is a month tapped on the net worth line; '' follows the month on screen. `goal`: a month tapped on the goal's bars.
+const view = { month: thisMonth(), unit: 'month', worth: '', query: '', cat: 'all', acc: 'all', rows: 60, goal: '' };
 
 const cardById = (id) => state.cards.find((card) => card.id === id);
 const purchaseById = (id) => state.purchases.find((purchase) => purchase.id === id);
@@ -1060,22 +1061,12 @@ function balanceCard(month, now, { coming, waiting }) {
     </a>`;
 }
 
-// The card under the pots: what will probably be left of the salary when the month is over. The salary is the average of
-// the three months before (salaryBase), so it moves on every month. Under the bar the salaries themselves, with the
-// months the average takes marked. `now` is this month's figures. Without a salary to go by it is what was spent and
-// what came in.
+// Insight's card for the running month: what will probably be left of the salary when the month is over. The salary is
+// the average of the three months before (salaryBase), so it moves on every month. Under the bar the salaries
+// themselves, with the months the average takes marked. `now` is this month's figures. No salary to go by: no card.
 function salaryCard(month, now, { waiting, sure, ahead }) {
   const { past, counted, usual } = salaryBase(bank, state.purchases, month);
-  if (!usual) {
-    return `
-      <a class="summary" href="#/inzicht">
-        <p class="footnote">${L('Uitgegeven in', 'Spent in')} ${monthName(month)}</p>
-        <p class="total">${formatEuro(now.spending)}</p>
-        <p class="footnote">${L('Binnengekomen', 'Came in')} ${formatEuro(now.income)} · ${now.income >= now.spending
-          ? `<span class="amount">${L('over', 'left')} ${formatEuro(now.income - now.spending)}</span>`
-          : `<span class="amount">${L('tekort', 'short')} ${formatEuro(now.spending - now.income)}</span>`}</p>
-      </a>`;
-  }
+  if (!usual) return '';
   const left = usual - ahead;
   const share = (cents) => `${Math.round(cents / usual * 100)}%`;
   const end = (cents) => Math.min(Math.max(cents, 0) / usual, 1) * 100; // where on the bar an amount reaches
@@ -1088,7 +1079,7 @@ function salaryCard(month, now, { waiting, sure, ahead }) {
   const span = counted.length > 1 ? L(`${monthLong(counted[0].month)} t/m ${monthLong(counted.at(-1).month)}`,
     `${monthLong(counted[0].month)} to ${monthLong(counted.at(-1).month)}`) : monthLong(counted[0].month);
   return `
-    <a class="summary" href="#/inzicht">
+    <section class="summary">
       <div class="summary-top">
         <p class="footnote">${left < 0 ? L(`Verwacht tekort eind ${monthLong(month)}`, `Expected short at the end of ${monthLong(month)}`)
           : L(`Verwacht over eind ${monthLong(month)}`, `Expected left at the end of ${monthLong(month)}`)}</p>
@@ -1111,7 +1102,159 @@ function salaryCard(month, now, { waiting, sure, ahead }) {
         <p class="footnote">${L(`Het gemiddelde is van ${span}; ${monthLong(month)} telt mee vanaf ${monthLong(shiftMonth(month, 1))}.`,
           `The average covers ${span}; ${monthLong(month)} counts from ${monthLong(shiftMonth(month, 1))}.`)}</p>
       </div>
-    </a>`;
+    </section>`;
+}
+
+// ---------- the savings goal ----------
+// Overview's first card: what every month saved against what the goal saves each month, as bars around this month.
+// A month tapped opens a panel under the bars with its figures and the net worth on its way to the goal's amounts.
+
+const goalWorth = (month) => worthOn(month === thisMonth() ? '9999' : `${month}-31`);
+const barEuro = (cents) => `${cents < 0 ? '−' : ''}${Math.round(Math.abs(cents) / 100).toLocaleString(LOCALE)}`; // on a bar: no euro sign
+const monthYear = (month) => `${monthShort(month)} ${month.slice(0, 4)}`;
+// While this month's salaries are not all in, what it saved so far will still go up.
+// shortcut: "all in" is 80% of the usual salary; count the payers instead if a full salary month ever comes in lower.
+const salaryPending = (month, now) => {
+  const { usual } = salaryBase(bank, state.purchases, month);
+  return usual > 0 && (now.byCat.get('salaris') ?? 0) < usual * 0.8;
+};
+
+// One bar per month of `list` (goalMonths): the amount to save each month is 60 high, a bar that would run off the
+// chart is cut short with a break in it. A month to come is an empty frame up to that amount; the running month has
+// the frame and its striped bar so far. Every month is a button; `chosen` is the one tapped.
+function goalBars(list, chosen, monthly) {
+  const slot = 326 / list.length;
+  const bars = list.map((each, index) => {
+    const x = slot * index + slot / 2;
+    const up = each.saved >= 0;
+    const tall = Math.abs(each.saved) / monthly * 60;
+    const height = Math.max(2, Math.min(tall, up ? 84 : 65));
+    const top = up ? 100 - height : 100;
+    const text = (words, y, kind = '') => `<text${kind && ` class="${kind}"`} x="${x.toFixed(1)}" y="${y.toFixed(1)}">${words}</text>`;
+    const frame = ['now', 'next'].includes(each.kind) ? `<rect class="frame" x="${(x - 11.25).toFixed(1)}" y="41" width="22.5" height="58" rx="4"/>` : '';
+    const bar = each.kind === 'next' ? '' : `
+      <rect class="${each.kind}" x="${(x - 12).toFixed(1)}" y="${top.toFixed(1)}" width="24" height="${height.toFixed(1)}" rx="${height < 8 ? 1 : 4}"/>${tall > height
+        ? `<path class="break" d="M${(x - 14).toFixed(1)} ${(up ? top + 19 : top + height - 19).toFixed(1)} l7 -4 l7 4 l7 -4 l7 4 v5 l-7 -4 l-7 4 l-7 -4 l-7 4z"/>` : ''}
+      ${text(barEuro(each.saved), up ? top - 5 : top + height + 14, each.kind === 'now' ? 'now-text' : '')}`;
+    const picked = each.month === chosen;
+    return `<g class="slot${picked ? ' picked' : ''}">${picked ? `<rect class="band" x="${(x - 19).toFixed(1)}" y="0" width="38" height="196" rx="9"/>` : ''}
+      ${frame}${bar}${text(monthShort(each.month), 192, 'month')}</g>`;
+  }).join('');
+  const hits = list.map((each, index) => `<rect class="hit" x="${(slot * index).toFixed(1)}" y="0" width="${slot.toFixed(1)}" height="196"
+    role="button" tabindex="0" data-action="pickGoal" data-id="${each.month}" aria-pressed="${each.month === chosen}"
+    aria-label="${monthName(each.month)}: ${each.kind === 'next' ? L('nog te sparen', 'still to save') : L('gespaard', 'saved')} ${wholeEuro(each.saved)}"/>`).join('');
+  return `
+    <svg class="goal-bars${chosen ? ' has-pick' : ''}" viewBox="0 0 326 196" role="group" aria-label="${L('Gespaard per maand', 'Saved per month')}">
+      <defs><pattern id="goal-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+        <rect class="hatch-bg" width="6" height="6"/><rect class="hatch-line" width="2.5" height="6"/></pattern></defs>
+      <line class="target" x1="0" x2="326" y1="40" y2="40"/><line class="zero" x1="0" x2="326" y1="100" y2="100"/>
+      <text class="target-text" x="324" y="34">${L('doel', 'goal')} ${wholeEuro(monthly)}</text>
+      ${bars}${hits}
+    </svg>`;
+}
+
+// The net worth at the end of each month of `history` and, dashed, the plan from the end of the last full month
+// (`base`) on at the goal's amount a month, up to its highest amount; a dotted line for each amount, the month it is
+// reached at its dot. `chosen` is marked with a line and a dot.
+function goalLine(goal, history, base, steps, chosen) {
+  const last = shiftMonth(thisMonth(), -1);
+  const first = history[0].month;
+  const open = steps.filter((step) => step.month);
+  const end = [open.at(-1)?.month ?? '', shiftMonth(thisMonth(), 3), chosen].sort().at(-1);
+  const span = Math.max(1, monthsFrom(first, end));
+  const planAt = (at) => base + goal.monthly * (at - monthsFrom(first, last)); // `at`: months after `first`, may be part of one
+  const reachAt = (cents) => monthsFrom(first, last) + (cents - base) / goal.monthly;
+  const planEnd = open.length ? reachAt(open.at(-1).cents) : span;
+  const values = [...history.map((point) => point.worth), goal.steps.at(-1).cents, planAt(planEnd)];
+  const low = Math.min(0, ...values);
+  const high = Math.max(...values);
+  const x = (at) => (4 + at / span * 276).toFixed(1);
+  const y = (cents) => (112 - (cents - low) / (high - low || 1) * 94).toFixed(1);
+  const lines = steps.map((step, index) => {
+    const top = index === steps.length - 1;
+    const label = `${esc(step.name)} · ${wholeEuro(step.cents)}${step.month ? '' : ` · ${L('bereikt', 'reached')}`}`;
+    const at = reachAt(step.cents);
+    const far = Number(x(at)) > 210;
+    return `<line class="step" x1="4" x2="280" y1="${y(step.cents)}" y2="${y(step.cents)}"/>
+      <text x="${top ? 4 : 280}" y="${(Number(y(step.cents)) - 6).toFixed(1)}"${top ? '' : ' text-anchor="end"'}>${label}</text>${step.month ? `
+      <circle class="mark" cx="${x(at)}" cy="${y(step.cents)}" r="5.5"/>
+      <text class="when" x="${far ? 280 : (Number(x(at)) + 7).toFixed(1)}" y="${(Number(y(step.cents)) + (far ? 22 : 15)).toFixed(1)}"${far ? ' text-anchor="end"' : ''}>${monthYear(step.month)}</text>` : ''}`;
+  }).join('');
+  const chosenAt = monthsFrom(first, chosen);
+  const chosenWorth = history.find((point) => point.month === chosen)?.worth ?? planAt(chosenAt);
+  // the years between the first and the last month, at their January, where they do not run into the month at either end
+  const years = Array.from({ length: Number(end.slice(0, 4)) - Number(first.slice(0, 4)) }, (unused, index) => String(Number(first.slice(0, 4)) + index + 1))
+    .map((year) => ({ year, at: monthsFrom(first, `${year}-01`) })).filter(({ at }) => Number(x(at)) > 52 && Number(x(at)) < 232);
+  return `
+    <svg class="goal-line" viewBox="0 0 284 130" role="img" aria-label="${L('Vermogen en het plan', 'Net worth and the plan')}: ${steps.map((step) =>
+      `${esc(step.name)} ${wholeEuro(step.cents)} ${step.month ? monthName(step.month) : L('bereikt', 'reached')}`).join(', ')}">
+      <line class="base" x1="4" x2="280" y1="${y(0)}" y2="${y(0)}"/>
+      ${lines}
+      <line class="rule" x1="${x(chosenAt)}" x2="${x(chosenAt)}" y1="22" y2="112"/>
+      <polyline class="stroke" points="${history.map((point) => `${x(monthsFrom(first, point.month))},${y(point.worth)}`).join(' ')}"/>
+      <line class="plan" x1="${x(monthsFrom(first, last))}" y1="${y(base)}" x2="${x(planEnd)}" y2="${y(planAt(planEnd))}"/>
+      <circle class="dot" cx="${x(chosenAt)}" cy="${y(chosenWorth)}" r="4.5"/>
+      <text x="4" y="127">${monthYear(first)}</text>
+      ${years.map(({ year, at }) => `<text x="${x(at)}" y="127" text-anchor="middle">${year}</text>`).join('')}
+      <text x="280" y="127" text-anchor="end">${monthYear(end)}</text>
+    </svg>`;
+}
+
+// The panel of the month tapped: three figures, a note while the salaries are not all in, and the line to the goal.
+function goalPop(goal, data, history, chosen, pending) {
+  const each = data.list.find((item) => item.month === chosen);
+  const end = L(`eind ${monthLong(chosen)}`, `end of ${monthLong(chosen)}`);
+  const rows = {
+    now: [[L('Gespaard tot nu', 'Saved so far'), wholeEuro(each.saved)], [L(`Plan ${end}`, `Plan ${end}`), wholeEuro(data.plan)], [L('Vermogen nu', 'Net worth now'), formatEuro(each.worth)]],
+    done: [[L('Gespaard', 'Saved'), wholeEuro(each.saved)], [L('Doel', 'Goal'), wholeEuro(goal.monthly)], [L(`Vermogen ${end}`, `Net worth ${end}`), formatEuro(each.worth)]],
+    before: [[L('Gespaard', 'Saved'), wholeEuro(each.saved)], [L(`Vermogen ${end}`, `Net worth ${end}`), formatEuro(each.worth)]],
+    next: [[L('Te sparen', 'To save'), wholeEuro(goal.monthly)], [L(`Plan ${end}`, `Plan ${end}`), wholeEuro(each.worth)]],
+  }[each.kind];
+  const [tone, chip] = {
+    now: ['', L('loopt nog', 'running')],
+    next: ['', L('plan', 'plan')],
+    before: [' quiet', L('voor het doel', 'before the goal')],
+    done: each.saved >= goal.monthly ? [' met', L('gehaald', 'made it')] : [' quiet', L('onder het doel', 'under the goal')],
+  }[each.kind];
+  return `
+    <section class="goal-pop" data-at="${((data.list.indexOf(each) + 0.5) / data.list.length).toFixed(3)}" aria-label="${monthName(chosen)}">
+      <div class="pop-head"><h3>${monthName(chosen)}</h3><span class="chip${tone}">${chip}</span></div>
+      <dl class="pop-figures">${rows.map(([name, value]) => `<dt>${name}</dt><dd>${value}</dd>`).join('')}</dl>
+      ${each.kind === 'now' && pending ? `<p class="pop-note">${icon('warn')}${L('Nog niet alle salarissen zijn binnen, dit loopt nog op', 'Not all salaries are in yet, this will still go up')}</p>` : ''}
+      <div class="pop-graph-head"><h4>${L('Op weg naar het doel', 'On the way to the goal')}</h4>
+        <span>${L(`bij ${wholeEuro(goal.monthly)} p/m`, `at ${wholeEuro(goal.monthly)} a month`)}</span></div>
+      ${goalLine(goal, history, data.base, data.steps, chosen)}
+    </section>`;
+}
+
+// The card itself; without a goal, a row that sets one.
+function goalCard(month, now) {
+  const goal = bank.goal;
+  const head = `<h2 class="section split-head"><span>${L('Doelen', 'Goals')}</span>${goal ? `<span>${L(`${wholeEuro(goal.monthly)} p/m`, `${wholeEuro(goal.monthly)} a month`)}</span>` : ''}</h2>`;
+  if (!goal) return `${head}<div class="group"><button class="row tint" data-action="editGoal">${L('Spaardoel instellen', 'Set a savings goal')}</button></div>`;
+  // the line starts where the data does, and at least at the end of last month, where the plan starts
+  const first = [monthOf(bank.since || isoDate()), shiftMonth(month, -1)].sort()[0];
+  const data = goalMonths(goal, goalWorth, month, first);
+  const chosen = data.list.some((each) => each.month === view.goal) ? view.goal : '';
+  const history = Array.from({ length: monthsFrom(first, month) + 1 }, (unused, index) => shiftMonth(first, index)).map((each) => ({ month: each, worth: goalWorth(each) }));
+  const next = data.steps.find((step) => step.month);
+  const pending = salaryPending(month, now);
+  const kinds = new Set(data.list.map((each) => each.kind));
+  const keys = [['before', 'k-before', L('Voor het doel', 'Before the goal')], ['done', 'k-out', L('Gespaard', 'Saved')],
+    ['now', 'k-pots', L('Loopt nog', 'Running')], ['next', 'k-ahead', L('Nog te sparen', 'Still to save')]].filter(([kind]) => kinds.has(kind));
+  return `${head}
+    <section class="summary goal">
+      <button class="goal-head" data-action="editGoal">
+        <span class="goal-icon">${icon('home')}</span>
+        <span class="row-main"><strong>${esc(goal.name)}</strong><small>${L(`sparen tot ${wholeEuro(goal.steps.at(-1).cents)}`, `saving up to ${wholeEuro(goal.steps.at(-1).cents)}`)}</small></span>
+        <span class="goal-next">${next ? `<small>${wholeEuro(next.cents)}</small><b>${monthYear(next.month)}</b>` : `<b>${L('Bereikt', 'Reached')}</b>`}</span>
+      </button>
+      <p class="footnote">${L(`Gespaard in ${monthLong(month)}, tot nu`, `Saved in ${monthLong(month)}, so far`)}</p>
+      <p class="total">${wholeEuro(data.list.find((each) => each.kind === 'now').saved)}</p>
+      <p class="footnote">${pending ? L('Nog niet alle salarissen binnen · tik op een maand', 'Not all salaries in yet · tap a month') : L('Tik op een maand voor meer', 'Tap a month for more')}</p>
+      <div class="goal-chart">${goalBars(data.list, chosen, goal.monthly)}${chosen ? goalPop(goal, data, history, chosen, pending) : ''}</div>
+      <p class="legend goal-legend">${keys.map(([, key, text]) => `<span><i class="key ${key}"></i>${text}</span>`).join('')}</p>
+    </section>`;
 }
 
 function overviewScreen() {
@@ -1121,8 +1264,6 @@ function overviewScreen() {
   // an account with nothing on it (the savings account kept at 0) needs no new files
   const oldest = Math.max(0, ...bank.accounts.filter((account) => !account.shop && account.balance !== 0).map((account) => daysLeft(today, isoDate(new Date(account.uploaded)))));
   const coming = outlook(month, now.spending, Number(today.slice(8)) < daysIn(month));
-  const { fixed, due, waiting } = coming;
-  const suggested = fixedSuggestions(bank, month).length;
   const open = openCount();
   const gaps = bank.accounts.filter((account) => hasGap(bank, account));
   const title = `
@@ -1186,22 +1327,15 @@ function overviewScreen() {
   return {
     html: `${title}
       ${fetched}
+      ${goalCard(month, now)}
       ${balanceCard(month, now, coming)}
       <h2 class="section split-head"><span>${L('Potjes', 'Pots')}</span>${pots().length ? `<span><i class="key today"></i>${L('vandaag', 'today')}</span>` : ''}</h2>
       ${pots().length ? `<div class="summary pots">${pots().map((cat) => potLine(cat, now.byCat.get(cat.id) ?? 0)).join('')}</div>`
         : `<div class="group"><a class="row tint" href="#/potjes">${L('Kies een bedrag per maand voor een potje', 'Choose an amount per month for a pot')}</a></div>`}
-      ${salaryCard(month, now, coming)}
       ${todos.length ? `
         <h2 class="section split-head"><span>${L('Te doen', 'To do')}</span><span>${todos.length}</span></h2>
         <ul class="group todos">${todos.join('')}</ul>` : ''}
       ${pushNotice()}
-      <h2 class="section split-head"><span>${L('Wat nog komt', 'Still to come')}</span><span>${waiting ? formatEuro(waiting) : ''}</span></h2>
-      <ul class="group dated">
-        ${due.map(dueRow).join('')}
-        <li><a class="row" href="#/vast"><span class="row-main">${fixed.costs.length ? L('Alle vaste lasten', 'All fixed costs') : L('Vaste lasten', 'Fixed costs')}
-          <small>${fixed.costs.length ? fixed.text : suggested ? L(plural(suggested, 'voorstel', 'voorstellen'), plural(suggested, 'suggestion', 'suggestions')) : L('Nog geen', 'None yet')}</small></span>
-          <span class="amount">${fixed.costs.length ? formatEuro(fixed.total) : ''}</span>${icon('next')}</a></li>
-      </ul>
       <h2 class="section split-head"><span>${L('Vermogen', 'Net worth')}</span><span>${worths.length > 1 ? L(`${worths.length} maanden`, `${worths.length} months`) : ''}</span></h2>
       <a class="summary worth-card" href="#/inzicht/vermogen">
         <p class="tile-total">${formatEuro(worthOn('9999'))}</p>
@@ -1705,6 +1839,7 @@ function insightScreen() {
       : L(`${wholeEuro(Math.abs(diff))} ${diff > 0 ? 'meer' : 'minder'} dan ${nl}`, `${wholeEuro(Math.abs(diff))} ${diff > 0 ? 'more' : 'less'} than ${en}`))}</p>`;
   }
   const { fixed, due, coming, waiting, sure, rate, ahead } = outlook(view.month, now.spending, open);
+  const salary = running ? salaryCard(view.month, now, { waiting, sure, ahead }) : '';
   const fixedRow = !yearly && fixed.costs.length ? `
     <a class="row" href="#/vast"><span class="row-main">${L('Vaste lasten', 'Fixed costs')} <small>${fixed.text}</small></span>
       <span class="amount">${formatEuro(fixed.total)}</span>${icon('next')}</a>` : '';
@@ -1749,6 +1884,7 @@ function insightScreen() {
           </div>` : ''}
         ${flowChart(chartMonths(), yearly ? '' : view.month)}
       </section>
+      ${salary && `<h2 class="section">${L('Salaris', 'Salary')}</h2>${salary}`}
       ${open ? `
         <h2 class="section split-head"><span>${L('Rest van de maand', 'Rest of the month')}</span>
           <span>${daysLeft === 1 ? L('nog 1 dag', '1 day left') : L(`nog ${daysLeft} dagen`, `${daysLeft} days left`)}</span></h2>
@@ -2370,6 +2506,8 @@ function render() {
     : (SCREENS[route()] ?? overviewScreen)();
   document.body.classList.toggle('pay', atTill);
   app.innerHTML = screen.html;
+  // where the goal panel's point sits: set here, as the page allows no style attributes
+  app.querySelector('.goal-pop')?.style.setProperty('--at', app.querySelector('.goal-pop').dataset.at);
   $('dock').innerHTML = screen.dock ?? '';
   $('dock').hidden = !screen.dock;
   // the tab bar makes room for the screens the till reads: there the dock has the thumb
@@ -2800,6 +2938,58 @@ async function editCat(cat) {
   saveBank();
 }
 
+// The sheet of the savings goal: its name, what to save every month and up to three amounts to reach, each with a
+// name. The amounts are put in order; the month the goal starts is the month it was made in.
+async function editGoal() {
+  const goal = bank.goal;
+  const form = $('goalDialog').querySelector('form');
+  const field = form.elements;
+  const big = (cents) => (cents / 100).toLocaleString(LOCALE, { maximumFractionDigits: 2 });
+  form.reset();
+  field.name.value = goal?.name ?? '';
+  field.monthly.value = goal ? big(goal.monthly) : '';
+  for (const [index, step] of (goal?.steps ?? []).entries()) {
+    field[`stepCents${index}`].value = big(step.cents);
+    field[`stepName${index}`].value = step.name;
+  }
+  const { usual } = salaryBase(bank, state.purchases, thisMonth());
+  field.monthly.oninput = () => {
+    const cents = parseBig(field.monthly.value);
+    $('goalHint').textContent = !usual || !cents ? ''
+      : cents > usual ? L(`Meer dan je gemiddelde salaris van ${wholeEuro(usual)}.`, `More than your average salary of ${wholeEuro(usual)}.`)
+      : L(`${Math.round(cents / usual * 100)}% van je gemiddelde salaris van ${wholeEuro(usual)}. Dan blijft er ${wholeEuro(usual - cents)} per maand om uit te geven.`,
+        `${Math.round(cents / usual * 100)}% of your average salary of ${wholeEuro(usual)}. That leaves ${wholeEuro(usual - cents)} a month to spend.`);
+  };
+  field.monthly.oninput();
+  $('goalDeleteGroup').hidden = !goal;
+  let next;
+  const answer = await openDialog($('goalDialog'), () => {
+    const steps = [];
+    for (const index of [0, 1, 2]) {
+      const [amount, name] = [field[`stepCents${index}`].value.trim(), field[`stepName${index}`].value.trim()];
+      if (!amount && !name) continue;
+      if (!parseBig(amount) || !isName(name)) return L('Vul bij elke mijlpaal een bedrag en een naam in.', 'Enter an amount and a name for each milestone.');
+      steps.push({ cents: parseBig(amount), name });
+    }
+    steps.sort((a, b) => a.cents - b.cents);
+    next = { name: field.name.value.trim(), monthly: parseBig(field.monthly.value), start: goal?.start ?? thisMonth(), steps };
+    if (!isName(next.name)) return L('Vul een naam in.', 'Enter a name.');
+    if (!next.monthly) return ENTER_AMOUNT;
+    if (!steps.length) return L('Vul minstens één mijlpaal in.', 'Enter at least one milestone.');
+    return isGoal(next) ? '' : L('Twee mijlpalen hebben hetzelfde bedrag.', 'Two milestones have the same amount.'); // the one way left to fail
+  });
+  if (answer === 'delete') {
+    if (!await ask(L(`Doel ${goal.name} verwijderen?`, `Delete the goal ${goal.name}?`), L('Verwijderen', 'Delete'))) return;
+    delete bank.goal;
+    view.goal = '';
+    saveBank();
+    return;
+  }
+  if (answer !== 'ok' || !next) return; // never save a goal that was not checked: saved data must stay readable
+  bank.goal = next;
+  saveBank();
+}
+
 // Resolves with the entered text, or null when cancelled.
 // Asks for a line of text: a name, unless `check` says otherwise (it returns an error message, or '' when fine).
 async function askText(title, label, value, { check = (text) => (isName(text) ? '' : L('Vul een naam in.', 'Enter a name.')), max = 30, ok = L('Opslaan', 'Save') } = {}) {
@@ -3082,6 +3272,13 @@ const actions = {
   addCat: () => editCat(),
   editCat: (card, button) => editCat(catById(button.dataset.id)),
   deleteCat: (card, button) => closeDialog(button.closest('dialog'), 'delete'),
+  editGoal: () => editGoal(),
+  deleteGoal: (card, button) => closeDialog(button.closest('dialog'), 'delete'),
+  // a month on the goal's bars opens its panel; the same month again closes it
+  pickGoal(card, button) {
+    view.goal = view.goal === button.dataset.id ? '' : button.dataset.id;
+    redraw(`[data-action="pickGoal"][data-id="${button.dataset.id}"]`);
+  },
   async renameAccount(card, button) {
     const account = accountById(button.dataset.id);
     const name = await askText(L('Naam van de rekening', 'Name of the account'), `${account.bank} ${account.id.slice(-4)}`, account.name);
@@ -3332,6 +3529,11 @@ document.addEventListener('click', (event) => {
   if (event.target.closest('a[href^="#/"]')) tapped = true;
   if (event.target.matches('.action-sheet')) closeDialog(event.target); // a tap on the dimmed area cancels
   const target = event.target.closest('[data-action]');
+  // a tap anywhere but on the goal's month panel or its months closes the panel
+  if (view.goal && !event.target.closest('.goal-pop, [data-action="pickGoal"]')) {
+    view.goal = '';
+    render();
+  }
   if (target) actions[target.dataset.action](currentCard(), target);
 });
 $('importFile').addEventListener('change', importBackup);
@@ -3355,6 +3557,12 @@ document.addEventListener('change', (event) => {
 });
 // the months of the line chart are drawn, not buttons: give them the keys a button has
 document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && view.goal && !busy()) {
+    const id = view.goal;
+    view.goal = '';
+    redraw(`[data-action="pickGoal"][data-id="${id}"]`);
+    return;
+  }
   if (!['Enter', ' '].includes(event.key) || !event.target.matches?.('svg [role="button"]')) return;
   event.preventDefault();
   actions[event.target.dataset.action](undefined, event.target);

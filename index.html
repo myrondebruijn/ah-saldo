@@ -235,6 +235,45 @@
     </form>
   </dialog>
 
+  <dialog id="goalDialog" class="sheet" aria-labelledby="goalTitle">
+    <form method="dialog" novalidate>
+      <header class="sheet-bar">
+        <button type="button" class="text-button" data-action="close" data-en="Cancel">Annuleren</button>
+        <h2 id="goalTitle" data-en="Savings goal">Spaardoel</h2>
+        <button class="text-button strong" value="ok" data-en="Save">Opslaan</button>
+      </header>
+      <div class="group">
+        <label class="field"><span data-en="Name">Naam</span>
+          <input name="name" maxlength="30" autocomplete="off" placeholder="Huis kopen" data-en="Buy a house">
+        </label>
+        <label class="field"><span data-en="Save every month">Elke maand sparen</span>
+          <input name="monthly" inputmode="decimal" autocomplete="off" placeholder="0,00" data-en="0.00">
+        </label>
+      </div>
+      <p class="group-note" id="goalHint"></p>
+      <h3 class="section" data-en="Milestones">Mijlpalen</h3>
+      <div class="group">
+        <div class="step-field">
+          <label class="field"><span data-en="Amount">Bedrag</span><input name="stepCents0" inputmode="decimal" autocomplete="off" placeholder="40.000" data-en="40,000"></label>
+          <label class="field"><span data-en="Name">Naam</span><input name="stepName0" maxlength="30" autocomplete="off" placeholder="Huizen kijken" data-en="Start looking"></label>
+        </div>
+        <div class="step-field">
+          <label class="field"><span data-en="Amount">Bedrag</span><input name="stepCents1" inputmode="decimal" autocomplete="off"></label>
+          <label class="field"><span data-en="Name">Naam</span><input name="stepName1" maxlength="30" autocomplete="off"></label>
+        </div>
+        <div class="step-field">
+          <label class="field"><span data-en="Amount">Bedrag</span><input name="stepCents2" inputmode="decimal" autocomplete="off"></label>
+          <label class="field"><span data-en="Name">Naam</span><input name="stepName2" maxlength="30" autocomplete="off"></label>
+        </div>
+      </div>
+      <p class="group-note" data-en="Up to three. Kassa works out the month you get there from your net worth at the end of last month, adding the amount for every month.">Tot drie. Kassa rekent uit in welke maand je er bent: vanaf je vermogen eind vorige maand, met elke maand het bedrag erbij.</p>
+      <p class="error" role="alert"></p>
+      <div class="group" id="goalDeleteGroup">
+        <button type="button" class="row danger" data-action="deleteGoal" data-en="Delete goal">Doel verwijderen</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="tradeDialog" class="sheet" aria-labelledby="tradeTitle">
     <form method="dialog" novalidate>
       <header class="sheet-bar">

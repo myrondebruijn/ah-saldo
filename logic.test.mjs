@@ -183,3 +183,15 @@ test('parseState rejects anything that is not our shape', () => {
   ];
   for (const json of bad) assert.throws(() => logic.parseState(json), json);
 });
+
+test('parseBig reads large amounts with thousands grouped by a point or a comma', () => {
+  assert.equal(logic.parseBig('40.000'), 4000000);
+  assert.equal(logic.parseBig('€ 160.000'), 16000000);
+  assert.equal(logic.parseBig('160,000'), 16000000);
+  assert.equal(logic.parseBig('4.200,50'), 420050);
+  assert.equal(logic.parseBig('4200'), 420000);
+  assert.equal(logic.parseBig('12,50'), 1250);
+  assert.equal(logic.parseBig('1.234.567'), 123456700);
+  assert.equal(logic.parseBig('4.2000'), null);
+  assert.equal(logic.parseBig('veertig'), null);
+});

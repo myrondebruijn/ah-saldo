@@ -21,6 +21,7 @@ body {
   }
   /* sheets sit one level above the black page, or their edge would vanish into it */
   body:not(.pay) dialog { --bg: #1c1c1e; --cell: #2c2c2e; --line: #48484a; --fill: #313134; }
+  body:not(.pay) .goal-pop { --cell: #2c2c2e; --line: #48484a; --fill: #3a3a3c; } /* one level above the card it lies on */
 }
 /* a till scanner needs a white screen, whatever the phone's theme */
 body.pay { --bg: #fff; --cell: #f2f2f7; }
@@ -510,7 +511,66 @@ svg.pace { display: block; width: 100%; height: auto; margin-top: .625rem; overf
 .ring-key .key { margin: .25rem 0 0; }
 .ring-key strong { display: block; color: var(--label); font-size: 1.0625rem; font-weight: 600; }
 .key.k-pots { background: repeating-linear-gradient(135deg, var(--tint) 0 2px, var(--meter-track) 2px 5px); }
-.pots + .summary, .group + a.summary { margin-top: 1rem; } /* the salary card under the pots */
+.pots + .summary, .group + a.summary { margin-top: 1rem; }
+/* the savings goal: its name and next amount over the bars of what each month saved; a month tapped opens a panel over what follows */
+.goal + .summary { margin-top: 1.75rem; }
+.goal-head { display: flex; align-items: center; gap: .75rem; width: 100%; margin-bottom: .875rem; padding-bottom: .875rem; border-bottom: .5px solid var(--line); }
+.goal-icon { flex: none; display: grid; place-items: center; width: 2.25rem; height: 2.25rem; border-radius: .625rem; background: var(--tint); color: #fff; }
+.goal-head strong { display: block; font-size: 1.0625rem; font-weight: 600; }
+.goal-head small, .goal-next small { display: block; color: var(--label2); font-size: .8125rem; }
+.goal-next { flex: none; text-align: right; }
+.goal-next b { display: block; color: var(--link); font-size: .9375rem; font-weight: 600; }
+.goal-chart { position: relative; margin-top: .875rem; }
+.goal-bars { display: block; width: 100%; height: auto; overflow: visible; }
+.goal-bars text { fill: var(--label2); font-size: 11px; text-anchor: middle; }
+.goal-bars .target-text { fill: var(--link); font-weight: 600; text-anchor: end; }
+.goal-bars .target { stroke: var(--tint); stroke-width: 1.5; stroke-dasharray: 4 4; }
+.goal-bars .zero { stroke: var(--line); }
+.goal-bars .before { fill: var(--quiet); }
+.goal-bars .done { fill: var(--tint); }
+.goal-bars .now { fill: url(#goal-hatch); }
+.goal-bars .hatch-bg { fill: var(--meter-track); }
+.goal-bars .hatch-line { fill: var(--tint); }
+.goal-bars .frame { fill: none; stroke: var(--tint); stroke-opacity: .45; stroke-width: 1.5; stroke-dasharray: 3 3; }
+.goal-bars .break { fill: var(--cell); }
+.goal-bars .now-text { fill: var(--link); font-weight: 600; }
+.goal-bars .band { fill: var(--fill); }
+.goal-bars .picked .month { fill: var(--label); font-weight: 700; }
+.goal-bars.has-pick .slot:not(.picked) { opacity: .4; }
+.goal-bars .hit { fill: transparent; cursor: pointer; outline-offset: -3px; }
+.goal-legend { justify-content: flex-start; gap: .25rem .875rem; }
+.goal-legend .key { border-radius: .1875rem; vertical-align: -.0625rem; }
+.key.k-before { background: var(--quiet); }
+.goal-pop { position: absolute; z-index: 2; top: calc(100% + .625rem); right: -.5rem; left: -.5rem; padding: .875rem 1rem .625rem; border-radius: .875rem;
+  background: var(--cell); box-shadow: 0 .875rem 2.5rem rgb(0 0 0 / .22), 0 0 0 .5px rgb(0 0 0 / .08); }
+.goal-pop::before { content: ""; position: absolute; top: -.4375rem; left: calc(.5rem + (100% - 1rem) * var(--at) - .4375rem); width: .875rem; height: .875rem; border-radius: 2px; background: inherit; rotate: 45deg; }
+.pop-head { position: relative; display: flex; justify-content: space-between; align-items: center; gap: .75rem; }
+.pop-head h3 { font-size: 1.0625rem; font-weight: 600; }
+.pop-head h3::first-letter { text-transform: uppercase; }
+.chip { flex: none; padding: .1875rem .5rem; border-radius: 99px; background: var(--meter-track); color: var(--link); font-size: .75rem; font-weight: 600; }
+.chip.met { background: var(--plus-bg); color: var(--plus); }
+.chip.quiet { background: var(--fill); color: var(--label2); }
+.pop-figures { display: grid; grid-template-columns: 1fr auto; gap: .25rem .75rem; margin-top: .625rem; font-size: .8125rem; }
+.pop-figures dt { color: var(--label2); }
+.pop-figures dd { font-weight: 600; text-align: right; }
+.pop-note { display: flex; align-items: center; gap: .375rem; margin-top: .625rem; padding: .375rem .625rem; border-radius: .5rem; background: var(--soon-bg); color: var(--soon); font-size: .75rem; }
+.pop-note .icon { width: .875rem; height: .875rem; }
+.pop-graph-head { display: flex; justify-content: space-between; align-items: baseline; gap: .75rem; margin-top: .75rem; padding-top: .625rem; border-top: .5px solid var(--line); font-size: .8125rem; }
+.pop-graph-head h4 { margin: 0; font-weight: 600; }
+.pop-graph-head span { color: var(--label2); font-size: .75rem; }
+.goal-line { display: block; width: 100%; height: auto; margin-top: .5rem; overflow: visible; }
+.goal-line text { fill: var(--label2); font-size: 10.5px; }
+.goal-line .when { fill: var(--link); font-size: 11px; font-weight: 600; }
+.goal-line .base { stroke: var(--line); }
+.goal-line .step { stroke: var(--quiet); stroke-dasharray: 2 4; }
+.goal-line .rule { stroke: var(--tint); stroke-opacity: .35; }
+.goal-line .stroke { fill: none; stroke: var(--tint); stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+.goal-line .plan { stroke: var(--tint); stroke-width: 2.5; stroke-dasharray: 5 5; stroke-linecap: round; }
+.goal-line .dot { fill: var(--tint); stroke: var(--cell); stroke-width: 2; }
+.goal-line .mark { fill: var(--cell); stroke: var(--tint); stroke-width: 2.5; }
+/* a milestone in the goal's sheet: its amount beside its name */
+.step-field { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); }
+.step-field .field + .field { border-left: .5px solid var(--line); }
 .salary, .detail { margin-top: 1rem; padding-top: .875rem; border-top: .5px solid var(--line); } /* a second part of a summary cell, under a hairline */
 .salary h3, .detail h3 { font-size: .8125rem; font-weight: 600; }
 .salary .footnote, .detail .footnote { margin-top: .5rem; }

@@ -13,6 +13,8 @@ export function parseEuro(text, digits = 4) {
   const match = new RegExp(`^(\\d{1,${digits}})(?:[.,](\\d{1,2}))?$`).exec(String(text).replace(/[€\s]/g, ''));
   return match && Number(match[1]) * 100 + Number((match[2] ?? '').padEnd(2, '0'));
 }
+// The same for amounts up to millions: a point or comma before exactly three digits groups thousands ("40.000", "160,000", "4.200,50").
+export const parseBig = (text) => parseEuro(String(text).replace(/[€\s]/g, '').replace(/[.,](?=\d{3}(?!\d))/g, ''), 7);
 
 export const formatEuro = (cents, locale = 'nl-NL') => (cents / 100).toLocaleString(locale, { style: 'currency', currency: 'EUR' });
 
