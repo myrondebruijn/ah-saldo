@@ -1982,7 +1982,8 @@ function insightScreen() {
           <li class="row"><span class="row-main">${L('Cadeaukaarten', 'Gift cards')}</span>
             <span class="amount">${formatEuro(cardsOn(state.cards, worthMonth === thisMonth() ? '9999' : `${worthMonth}-31`))}</span></li>
         </ul>` : ''}
-      ${investInsight(chartMonths(), yearly ? yearOf(view.month) : view.month)}`,
+      ${investInsight(chartMonths(), yearly ? yearOf(view.month) : view.month)}
+      <div class="period-bar" aria-hidden="true">${periodStepper().replaceAll('<button', '<button tabindex="-1"')}</div>`,
   };
 }
 
@@ -2483,6 +2484,9 @@ const DEPTH = { meer: 1, vast: 1, categorie: 1, archief: 1, uitgaven: 1, kaart: 
 const depth = () => DEPTH[route()] ?? 0;
 let shownDepth = 0;
 let tapped = false; // true when a tap inside the app caused the navigation
+// Insight's period bar is out once the stepper in the top card has scrolled away under it; it stays out through a redraw
+let periodShown = false;
+let periodWatch;
 
 // The tab bar. Betalen starts a payment at once when there is a card to pay with.
 const TABS = [
@@ -2524,6 +2528,16 @@ function render() {
   app.innerHTML = screen.html;
   // where the goal panel's point sits: set here, as the page allows no style attributes
   app.querySelector('.goal-pop')?.style.setProperty('--at', app.querySelector('.goal-pop').dataset.at);
+  periodWatch?.disconnect();
+  const bar = app.querySelector('.period-bar');
+  if (bar) {
+    bar.classList.toggle('shown', periodShown);
+    periodWatch = new IntersectionObserver(([entry]) => {
+      periodShown = !entry.isIntersecting && entry.boundingClientRect.top < entry.rootBounds.top;
+      bar.classList.toggle('shown', periodShown);
+    }, { rootMargin: '-44px 0px 0px 0px' }); // the bar's height: it takes over as the stepper slides under it
+    periodWatch.observe(app.querySelector('.period .stepper'));
+  }
   $('dock').innerHTML = screen.dock ?? '';
   $('dock').hidden = !screen.dock;
   // the tab bar makes room for the screens the till reads: there the dock has the thumb
@@ -2536,6 +2550,7 @@ function render() {
 
 // Draws the screen for the current address and lets screen readers and keyboards start at its top.
 function show() {
+  periodShown = false;
   render();
   scrollTo(0, 0);
   if (route() === 'inzicht' && routeId()) $(routeId())?.scrollIntoView(); // Overview's net worth opens Insight at its net worth

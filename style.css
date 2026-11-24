@@ -164,6 +164,28 @@ body:has(#dock:not([hidden])) main { padding-bottom: calc(7.5rem + env(safe-area
 .stepper button { display: grid; place-items: center; width: 2.75rem; height: 2.75rem; margin: -.5rem; color: var(--link); }
 .stepper button:disabled { color: var(--label2); opacity: .4; cursor: default; }
 .period .total { margin-top: .5rem; text-align: center; }
+/* Insight's period stays in sight: once the stepper in the top card has scrolled away, the same stepper slides in
+   at the top, its arrows straight above where the card's were (app.js shows it; screen readers have the card's) */
+.period-bar {
+  position: fixed;
+  inset: 0 0 auto;
+  z-index: 2;
+  padding: env(safe-area-inset-top) calc(max(1rem, env(safe-area-inset-right), 50% - 14rem) + 1.25rem) 0
+    calc(max(1rem, env(safe-area-inset-left), 50% - 14rem) + 1.25rem);
+  border-bottom: .5px solid var(--line);
+  background: var(--bg);
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  backdrop-filter: saturate(180%) blur(20px);
+  translate: 0 -100%;
+  opacity: 0;
+  visibility: hidden;
+}
+.period-bar.shown { translate: none; opacity: 1; visibility: visible; }
+.period-bar .stepper { min-height: 2.75rem; }
+@media (prefers-reduced-motion: no-preference) {
+  .period-bar { transition: translate .32s cubic-bezier(.32, .72, 0, 1), opacity .2s, visibility .32s; }
+}
 /* spending per period: the chosen period in blue, the others grey; a hairline is the baseline */
 .columns { position: relative; display: flex; margin-top: 1rem; }
 .columns::before { content: ""; position: absolute; top: 5.75rem; right: 0; left: 0; height: 1px; background: var(--line); }
