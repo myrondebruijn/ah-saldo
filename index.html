@@ -140,6 +140,9 @@
       <h3 class="section" data-en="For which shop">Voor welke winkel</h3>
       <div class="group" id="giftShops"></div>
       <p class="error" role="alert"></p>
+      <div class="group" id="giftNoneGroup">
+        <button type="button" class="row danger" data-action="noGift" data-en="Not a gift card">Geen cadeaukaart</button>
+      </div>
     </form>
   </dialog>
 
@@ -159,6 +162,7 @@
         <button type="button" class="row" id="txGift"><span class="row-main" data-en="Gift card">Cadeaukaart</span>
           <span class="quiet" id="txGiftNow"></span><svg class="icon" aria-hidden="true"><use href="#i-next"/></svg></button>
       </div>
+      <p class="group-note" id="txGiftNote" data-en="In this category the card counts as spent on the day it was bought. If you still pay with it, leave it in Gift cards: otherwise the money counts twice.">In deze categorie telt de kaart als uitgegeven op de dag van kopen. Betaal je er nog mee, laat hem dan op Cadeaukaarten staan: anders telt het geld dubbel.</p>
       <div class="group">
         <label class="row" id="txAllRow"><span class="row-main" id="txAllLabel"></span>
           <input type="checkbox" name="all" class="switch" role="switch"></label>

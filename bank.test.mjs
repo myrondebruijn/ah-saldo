@@ -355,8 +355,16 @@ test('gift cards: a card for another shop is spending, an AH card is balance, an
   data.since = '2026-07-03';
   assert.deepEqual(bank.giftsBought(data, '', '9999').map((shop) => shop.value), [10000, 4500]);
   assert.deepEqual(bank.giftsToFill(data).map((each) => each.id), ['f']);
-  data.txs.find((each) => each.id === 'f').cat = 'winkelen'; // sorted somewhere else: not a gift card after all
-  assert.deepEqual(bank.giftsToFill(data), []);
+  data.txs.find((each) => each.id === 'f').cat = 'winkelen'; // sorted somewhere else: it still bought a card, the shop sells nothing else
+  assert.deepEqual(bank.giftsToFill(data).map((each) => each.id), ['f']);
+  data.txs.push(tx({ id: 'h', cat: 'cadeaukaarten' }), tx({ id: 'i', cat: 'winkelen' })); // another shop: only what is in the category
+  assert.deepEqual(bank.giftsToFill(data).map((each) => each.id), ['h', 'f']);
+  data.txs.find((each) => each.id === 'c').cat = 'overig'; // a card keeps what it bought in any category, and counts there
+  assert.equal(bank.giftsBought(data, '', '9999')[0].value, 10000);
+  assert.equal(bank.figures(data, [], '2026-07-01', '2026-08-01').byCat.get('overig'), 9400);
+  data.txs.splice(-2);
+  delete data.txs.find((each) => each.id === 'c').cat;
+  delete data.txs.find((each) => each.id === 'f').cat;
   assert.deepEqual(bank.parseBank(JSON.parse(JSON.stringify(data))).txs[0].gift, { shop: 'Boekenbon', value: 5000 });
   const bad = (gift, cents = -4700) => assert.throws(() => bank.parseBank({ ...bank.emptyBank(), txs: [tx({ cents, gift })] }));
   bad({ shop: '', value: 5000 });
@@ -409,6 +417,9 @@ test("a shop's balance: cards bought for it are balance, and what is paid from i
   assert.equal(bank.balanceOn(data, account) - bank.balanceOn(data, account, '2026-05-31'), 2000 + 4000 - 4 * 1000);
   bank.payFrom(data, account, '2026-10-05', -500, 'Los spel');
   assert.equal(bank.balanceOn(data, account), 5500);
+  data.txs[1].cat = 'overig'; // a card sorted out of the gift cards is spent on the day it was bought, so it is not balance as well
+  assert.deepEqual([bank.balanceOn(data, account), spent().spending - after.spending], [1500, 3800 + 500]);
+  delete data.txs[1].cat;
   data.txs = data.txs.filter((each) => each.name !== 'Spelpas' || each.date !== '2026-06-30'); // removed by hand
   assert.deepEqual(bank.catchUp(data, '2026-10-30'), []); // it stays away, and October's 31st has not come
   assert.equal(bank.catchUp(data, '2026-10-31').length, 1);

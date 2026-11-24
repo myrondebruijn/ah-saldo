@@ -344,6 +344,8 @@ const KNOWN = [
 ];
 // a payment request from a person named like a shop ("Plus via Tikkie") is nobody's groceries
 const known = (key) => (key.includes('tikkie') ? undefined : KNOWN.find(([pattern]) => pattern.test(key))?.[1]);
+// A payment to the shop that sells the gift cards bought cards, whatever category it is sorted in.
+export const sellsCards = (tx) => known(ruleKey(tx.name)) === 'cadeaukaarten';
 
 // Returns the function that gives a transaction's category id, or '' while it still has to be sorted:
 // the choice for that one transaction, else the rule for its counterparty, else what the app can tell itself.
@@ -502,8 +504,16 @@ export function byParty(txs) {
 // ---------- gift cards ----------
 // A payment for gift cards can say what it bought: tx.gift = { shop, value }, the shop the cards are for and
 // what they are worth together. What they are worth above what was paid is what the cards saved.
+// That stays whatever category the payment is sorted in: the category only says where the money counts.
 
 const byDate = (a, b) => a.date.localeCompare(b.date);
+
+// The payments whose cards went onto `shop`'s cards or balance, the oldest first: the ones in the gift card
+// category. Sorted anywhere else a card counts as spent there on the day it was bought (figures), so it is no balance.
+export function onBalance(bank, shop) {
+  const catOf = sorter(bank);
+  return bank.txs.filter((tx) => tx.gift?.shop === shop && catOf(tx) === 'cadeaukaarten').sort(byDate);
+}
 
 // The gift cards bought from `from` up to `to`, never earlier than bank.since, per shop:
 // [{ shop, value, paid, count }], the largest value first.
@@ -521,11 +531,12 @@ export function giftsBought(bank, from, to) {
   return [...shops.values()].sort((a, b) => b.value - a.value);
 }
 
-// The payments in the gift card category that do not say yet what they bought, the newest first.
+// The payments for gift cards that do not say yet what they bought, the newest first: what is in the gift card
+// category, and what went to the shop that sells the cards and was sorted somewhere else.
 // A payment that came back (the same amount, on that day or later) bought nothing, so it is not in the list.
 export function giftsToFill(bank) {
   const catOf = sorter(bank);
-  const blank = bank.txs.filter((tx) => !tx.gift && catOf(tx) === 'cadeaukaarten').sort(byDate);
+  const blank = bank.txs.filter((tx) => !tx.gift && (catOf(tx) === 'cadeaukaarten' || sellsCards(tx))).sort(byDate);
   const open = blank.filter((tx) => tx.cents < 0);
   for (const back of blank.filter((tx) => tx.cents > 0)) {
     const index = open.findLastIndex((tx) => tx.cents === -back.cents && tx.date <= back.date);
@@ -561,10 +572,7 @@ export function giftGuesses(bank, paid) {
 
 const AH_LINE = /^((bck|ccv|sumup|zettle) )?(albert heijn|ah)( |$)/; // as a bank line names the shop (ruleKey)
 const dayAfter = (date, days) => new Date(Date.parse(date) + days * 864e5).toISOString().slice(0, 10);
-const cardPayments = (bank) => {
-  const catOf = sorter(bank);
-  return bank.txs.filter((tx) => tx.gift?.shop === AH && catOf(tx) === 'cadeaukaarten').sort(byDate);
-};
+const cardPayments = (bank) => onBalance(bank, AH);
 // two splits as one, the largest first
 function joined(...shares) {
   const sums = new Map();
@@ -837,7 +845,7 @@ export function holdings(bank) {
 export function balanceOn(bank, account, date = '9999') {
   const lines = bank.txs.filter((tx) => tx.acc === account.id);
   if (account.shop) {
-    const cards = bank.txs.filter((tx) => tx.gift?.shop === account.shop).map((tx) => ({ date: tx.date, cents: tx.gift.value }));
+    const cards = onBalance(bank, account.shop).map((tx) => ({ date: tx.date, cents: tx.gift.value }));
     return [...lines, ...cards].reduce((sum, move) => sum
       + (move.date > account.through && move.date <= date ? move.cents : 0)
       - (move.date > date && move.date <= account.through ? move.cents : 0), account.balance);

@@ -5,8 +5,8 @@ import {
 } from './logic.js';
 import {
   AH, LARGE, START_CATS, US, addBalance, addFile, addStarter, balanceOn, byParty, cardsOn, cardsToAdd, catchUp, decodeText, dayRate, dueOn, emptyBank, ended, figures, fixedCosts,
-  fixedSuggestions, forWhom, giftGuesses, giftsBought, giftsToFill, hasGap, heldShops, inCategory, monthOf, parseBank, payFrom, plannedOpen, potsLeft, readCsv, salaryBase,
-  addLinked, bought, deposits, holdings, invested, isTrade, readLinked, readOpenbank, ruleKey, shiftMonth, sortAll, sorter, strayDeposits, tie,
+  fixedSuggestions, forWhom, giftGuesses, giftsBought, giftsToFill, hasGap, heldShops, inCategory, monthOf, onBalance, parseBank, payFrom, plannedOpen, potsLeft, readCsv, salaryBase,
+  addLinked, bought, deposits, holdings, invested, isTrade, readLinked, readOpenbank, ruleKey, sellsCards, shiftMonth, sortAll, sorter, strayDeposits, tie,
 } from './bank.js';
 import {
   api, b64u, fromB64u, inviteId, isCode, makePasskey, merge, openData, rand, sealData, tokenOf, unwrap, usePasskey, wrap,
@@ -39,7 +39,8 @@ const STALE = 30; // days after which the overview asks for new bank files
 // Raise by one when the saved data gains something an older Kassa would drop while saving: the server then lets an
 // older Kassa read but not write (worker/index.js, PUT /vault), until that phone has the new one.
 // 2: the phones keep no copy; an older Kassa, which syncs a copy it keeps, may not write any more
-const DATA = 3; // 3: a card knows the payment that bought it, a till payment the bank line of its pin part
+// 3: a card knows the payment that bought it, a till payment the bank line of its pin part
+const DATA = 4; // 4: a payment keeps what gift card it bought in any category; an older Kassa took that off when it was sorted elsewhere
 const START_IDS = new Set(START_CATS.map((cat) => cat.id));
 const KIND_ORDER = ['out', 'in', 'none'];
 
@@ -891,7 +892,7 @@ function balanceScreen(account) {
   const moves = [
     ...bank.txs.filter((tx) => tx.acc === account.id).map((tx) => ({
       tx, cents: tx.cents, name: esc(tx.name), detail: `<span${catOf(tx) ? '' : ' class="todo"'}>${catName(catOf(tx))}</span>` })),
-    ...bank.txs.filter((tx) => tx.gift?.shop === account.shop).map((tx) => ({
+    ...onBalance(bank, account.shop).map((tx) => ({
       tx, cents: tx.gift.value, name: L('Cadeaukaart', 'Gift card'), detail: `${formatEuro(-tx.cents)} ${L('betaald', 'paid')}` })),
   ].sort((a, b) => b.tx.date.localeCompare(a.tx.date));
   return {
@@ -1493,8 +1494,8 @@ function categoryScreen(id) {
         ${rows.length > shownRows.length ? `<div class="group"><button class="row tint" data-action="moreRows">${L('Toon meer', 'Show more')}</button></div>` : ''}
         ${cat?.id === 'boodschappen' ? `<p class="group-note">${L('Was iets, of een deel ervan, voor iemand anders? Tik op de transactie en kies Voor wie. Wat je bij AH met cadeaukaarten en pin betaalde, staat hier als één aankoop.',
           'Was something, or part of it, for someone else? Tap the transaction and choose For whom. What you paid at AH with gift cards and debit card is one purchase here.')}</p>` : ''}
-        ${gifts ? `<p class="group-note">${L(`Een kaart van ${AH}, of van een winkel waarvan je het saldo bijhoudt, telt hier niet mee: het geld telt als uitgave zodra je ermee betaalt.`,
-          `A card for ${AH}, or for a shop whose balance you keep, does not count here: the money counts as spending once you pay with it.`)}</p>` : ''}`
+        ${gifts ? `<p class="group-note">${L(`Een kaart van ${AH}, of van een winkel waarvan je het saldo bijhoudt, telt hier niet mee: het geld telt als uitgave zodra je ermee betaalt. Een kaart die je in een andere categorie zet, telt daar als uitgave; wat hij bespaarde blijft hierboven meetellen.`,
+          `A card for ${AH}, or for a shop whose balance you keep, does not count here: the money counts as spending once you pay with it. A card you sort into another category counts as spending there; what it saved stays in the figures above.`)}</p>` : ''}`
       : blank(cat ? L('Niets in deze maand', 'Nothing this month') : L('Alles is ingedeeld', 'Everything is sorted'))}`,
   };
 }
@@ -2545,7 +2546,8 @@ async function askWho(purchase) {
 
 // Asks which shop a payment for gift cards was for and what the cards are worth. The app's own guess is filled
 // in when the price fits a shop bought before; choosing another shop fills in the value its discount gives.
-// `more` is how many payments wait after this one. Resolves with { shop, value }, or null when cancelled.
+// `more` is how many payments wait after this one. Resolves with { shop, value }, null when cancelled, or false
+// when a payment that said what it bought turns out to have bought no card.
 async function pickGift(tx, current, more = 0) {
   const form = $('giftDialog').querySelector('form');
   const guesses = giftGuesses(bank, -tx.cents);
@@ -2561,6 +2563,7 @@ async function pickGift(tx, current, more = 0) {
     + choice('', `<input class="row-main" name="other" maxlength="30" autocomplete="off" placeholder="${otherShop}" aria-label="${otherShop}"
       value="${listed ? '' : esc(first.shop)}">`, !listed && Boolean(first.shop));
   const { other, value } = form.elements;
+  $('giftNoneGroup').hidden = !current;
   value.value = first.value ? euroInput(first.value) : '';
   other.oninput = () => { other.closest('label').querySelector('[type="radio"]').checked = true; }; // typing a new shop chooses it
   $('giftShops').onchange = () => {
@@ -2576,7 +2579,7 @@ async function pickGift(tx, current, more = 0) {
     gift = { shop, value: parseEuro(value.value) };
     return '';
   });
-  return answer === 'ok' ? gift : null;
+  return answer === 'ok' ? gift : answer === 'delete' ? false : null;
 }
 
 // Sorts a transaction: a category for it alone, or for everything from its counterparty, and whether
@@ -2599,7 +2602,8 @@ async function askTx(tx) {
   const { all, fixed } = form.elements;
   $('txAllRow').hidden = !key;
   $('txAllLabel').textContent = L(`Ook al het andere van ${tx.name}`, `Everything else from ${tx.name} too`);
-  all.checked = Boolean(key) && tx.cat === undefined;
+  // not for the shop that sells the cards: its cards are for many shops, and each payment says where its own card counts
+  all.checked = Boolean(key) && tx.cat === undefined && !sellsCards(tx);
   $('txFixedRow').hidden = !key || tx.cents >= 0;
   fixed.checked = bank.fixed[key] === true;
   // "Voor wie?" shows while Boodschappen is the chosen category; the answer is kept here until the sheet is saved
@@ -2609,13 +2613,15 @@ async function askTx(tx) {
     $('txWhoGroup').hidden = tx.cents >= 0 || form.elements.cat.value !== 'boodschappen' || state.purchases.some((purchase) => purchase.tx === tx.id);
     $('txWhoNow').textContent = shares.map((share) => shown(share.who)).join(', ');
   };
-  // "Cadeaukaart" shows while the gift card category is chosen, and on a card that counts somewhere else as long
-  // as it stays there; sorting a payment out of where it was says it bought no card after all
+  // "Cadeaukaart" shows on a payment that bought cards: in the gift card category, to the shop that sells them, or
+  // filled in before. What it bought stays whatever the category becomes: the category only says where it counts.
   let { gift } = tx;
-  const keepsGift = () => tx.cents < 0 && (form.elements.cat.value === 'cadeaukaarten' || (Boolean(gift) && form.elements.cat.value === before));
+  const boughtCards = () => tx.cents < 0 && (form.elements.cat.value === 'cadeaukaarten' || Boolean(gift) || sellsCards(tx));
   const showGift = () => {
-    $('txGiftGroup').hidden = !keepsGift();
+    $('txGiftGroup').hidden = !boughtCards();
     $('txGiftNow').textContent = gift ? `${gift.shop} · ${formatEuro(gift.value)}` : L('Invullen', 'Fill in');
+    // a card that is balance (AH, a shop whose balance is kept) stops being that outside the gift card category
+    $('txGiftNote').hidden = !gift || !heldShops(bank).has(gift.shop) || ['cadeaukaarten', ''].includes(form.elements.cat.value);
   };
   $('txCats').onchange = () => { showWho(); showGift(); };
   $('txWho').onclick = async () => {
@@ -2623,7 +2629,8 @@ async function askTx(tx) {
     showWho();
   };
   $('txGift').onclick = async () => {
-    gift = await pickGift(tx, gift) ?? gift;
+    const picked = await pickGift(tx, gift);
+    if (picked !== null) gift = picked || undefined;
     showGift();
   };
   showWho();
@@ -2637,7 +2644,7 @@ async function askTx(tx) {
   if (answer !== 'ok') return;
   const cat = form.elements.cat.value;
   const filled = gift !== tx.gift; // what it bought was filled in or changed in this sheet
-  if (keepsGift() && gift) tx.gift = gift;
+  if (tx.cents < 0 && gift) tx.gift = gift;
   else delete tx.gift;
   if (cat === 'boodschappen' && tx.cents < 0 && shares.some((share) => share.who !== US)) tx.shares = shares;
   else delete tx.shares;
@@ -3097,6 +3104,7 @@ const actions = {
   },
   addPayment: (card, button) => askPayment(accountById(button.dataset.id)),
   deleteTx: (card, button) => closeDialog(button.closest('dialog'), 'delete'),
+  noGift: (card, button) => closeDialog(button.closest('dialog'), 'delete'),
   async correctBalance(card, button) {
     const account = accountById(button.dataset.id);
     const before = balanceOn(bank, account);
