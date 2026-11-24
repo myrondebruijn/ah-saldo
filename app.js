@@ -6,7 +6,7 @@ import {
 import {
   AH, LARGE, START_CATS, US, addBalance, addFile, addStarter, balanceOn, byParty, cardsOn, cardsToAdd, catchUp, decodeText, dayRate, dueOn, emptyBank, ended, figures, fixedCosts,
   fixedSuggestions, forWhom, giftGuesses, giftsBought, giftsToFill, hasGap, heldShops, inCategory, monthOf, onBalance, parseBank, payFrom, plannedOpen, potsLeft, readCsv, salaryBase,
-  addLinked, bought, deposits, goalMonths, holdings, invested, isGoal, isTrade, monthsFrom, readLinked, readOpenbank, ruleKey, sellsCards, shiftMonth, sortAll, sorter, strayDeposits, tie,
+  addLinked, bought, deposits, goalMonths, salaryToCome, holdings, invested, isGoal, isTrade, monthsFrom, readLinked, readOpenbank, ruleKey, sellsCards, shiftMonth, sortAll, sorter, strayDeposits, tie,
 } from './bank.js';
 import {
   api, b64u, fromB64u, inviteId, isCode, makePasskey, merge, openData, rand, sealData, tokenOf, unwrap, usePasskey, wrap,
@@ -1112,17 +1112,12 @@ function salaryCard(month, now, { waiting, sure, ahead }) {
 const goalWorth = (month) => worthOn(month === thisMonth() ? '9999' : `${month}-31`);
 const barEuro = (cents) => `${cents < 0 ? '−' : ''}${Math.round(Math.abs(cents) / 100).toLocaleString(LOCALE)}`; // on a bar: no euro sign
 const monthYear = (month) => `${monthShort(month)} ${month.slice(0, 4)}`;
-// While this month's salaries are not all in, what it saved so far will still go up.
-// shortcut: "all in" is 80% of the usual salary; count the payers instead if a full salary month ever comes in lower.
-const salaryPending = (month, now) => {
-  const { usual } = salaryBase(bank, state.purchases, month);
-  return usual > 0 && (now.byCat.get('salaris') ?? 0) < usual * 0.8;
-};
 
 // One bar per month of `list` (goalMonths): the amount to save each month is 60 high, a bar that would run off the
 // chart is cut short with a break in it. A month to come is an empty frame up to that amount; the running month has
-// the frame and its striped bar so far. Every month is a button; `chosen` is the one tapped.
-function goalBars(list, chosen, monthly) {
+// the frame and its striped bar so far, faint while it counts salary still to come (`guess`). Every month is a button;
+// `chosen` is the one tapped.
+function goalBars(list, chosen, monthly, guess) {
   const slot = 326 / list.length;
   const bars = list.map((each, index) => {
     const x = slot * index + slot / 2;
@@ -1133,16 +1128,17 @@ function goalBars(list, chosen, monthly) {
     const text = (words, y, kind = '') => `<text${kind && ` class="${kind}"`} x="${x.toFixed(1)}" y="${y.toFixed(1)}">${words}</text>`;
     const frame = ['now', 'next'].includes(each.kind) ? `<rect class="frame" x="${(x - 11.25).toFixed(1)}" y="41" width="22.5" height="58" rx="4"/>` : '';
     const bar = each.kind === 'next' ? '' : `
-      <rect class="${each.kind}" x="${(x - 12).toFixed(1)}" y="${top.toFixed(1)}" width="24" height="${height.toFixed(1)}" rx="${height < 8 ? 1 : 4}"/>${tall > height
+      <rect class="${each.kind}${each.kind === 'now' && guess ? ' guess' : ''}" x="${(x - 12).toFixed(1)}" y="${top.toFixed(1)}" width="24" height="${height.toFixed(1)}" rx="${height < 8 ? 1 : 4}"/>${tall > height
         ? `<path class="break" d="M${(x - 14).toFixed(1)} ${(up ? top + 19 : top + height - 19).toFixed(1)} l7 -4 l7 4 l7 -4 l7 4 v5 l-7 -4 l-7 4 l-7 -4 l-7 4z"/>` : ''}
-      ${text(barEuro(each.saved), up ? top - 5 : top + height + 14, each.kind === 'now' ? 'now-text' : '')}`;
+      ${text(`${each.kind === 'now' && guess ? '≈ ' : ''}${barEuro(each.saved)}`, up ? (frame ? Math.min(top, 41) : top) - 5 : top + height + 14, each.kind === 'now' ? `now-text${guess ? ' guess' : ''}` : '')}`;
     const picked = each.month === chosen;
     return `<g class="slot${picked ? ' picked' : ''}">${picked ? `<rect class="band" x="${(x - 19).toFixed(1)}" y="0" width="38" height="196" rx="9"/>` : ''}
       ${frame}${bar}${text(monthShort(each.month), 192, 'month')}</g>`;
   }).join('');
   const hits = list.map((each, index) => `<rect class="hit" x="${(slot * index).toFixed(1)}" y="0" width="${slot.toFixed(1)}" height="196"
     role="button" tabindex="0" data-action="pickGoal" data-id="${each.month}" aria-pressed="${each.month === chosen}"
-    aria-label="${monthName(each.month)}: ${each.kind === 'next' ? L('nog te sparen', 'still to save') : L('gespaard', 'saved')} ${wholeEuro(each.saved)}"/>`).join('');
+    aria-label="${monthName(each.month)}: ${each.kind === 'next' ? L('nog te sparen', 'still to save') : each.kind === 'now' && guess ? L('verwacht gespaard', 'expected saved')
+      : L('gespaard', 'saved')} ${wholeEuro(each.saved)}"/>`).join('');
   return `
     <svg class="goal-bars${chosen ? ' has-pick' : ''}" viewBox="0 0 326 196" role="group" aria-label="${L('Gespaard per maand', 'Saved per month')}">
       <defs><pattern id="goal-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
@@ -1155,8 +1151,9 @@ function goalBars(list, chosen, monthly) {
 
 // The net worth at the end of each month of `history` and, dashed, the plan from the end of the last full month
 // (`base`) on at the goal's amount a month, up to its highest amount; a dotted line for each amount, the month it is
-// reached at its dot. `chosen` is marked with a line and a dot.
-function goalLine(goal, history, base, steps, chosen) {
+// reached at its dot. `chosen` is marked with a line and a dot. With `guess` the last point counts salary still to
+// come, so the way to it is faint.
+function goalLine(goal, history, base, steps, chosen, guess) {
   const last = shiftMonth(thisMonth(), -1);
   const first = history[0].month;
   const open = steps.filter((step) => step.month);
@@ -1191,27 +1188,31 @@ function goalLine(goal, history, base, steps, chosen) {
       <line class="base" x1="4" x2="280" y1="${y(0)}" y2="${y(0)}"/>
       ${lines}
       <line class="rule" x1="${x(chosenAt)}" x2="${x(chosenAt)}" y1="22" y2="112"/>
-      <polyline class="stroke" points="${history.map((point) => `${x(monthsFrom(first, point.month))},${y(point.worth)}`).join(' ')}"/>
+      <polyline class="stroke" points="${(guess ? history.slice(0, -1) : history).map((point) => `${x(monthsFrom(first, point.month))},${y(point.worth)}`).join(' ')}"/>${guess ? `
+      <line class="stroke guess" x1="${x(history.length - 2)}" y1="${y(history.at(-2).worth)}" x2="${x(history.length - 1)}" y2="${y(history.at(-1).worth)}"/>` : ''}
       <line class="plan" x1="${x(monthsFrom(first, last))}" y1="${y(base)}" x2="${x(planEnd)}" y2="${y(planAt(planEnd))}"/>
-      <circle class="dot" cx="${x(chosenAt)}" cy="${y(chosenWorth)}" r="4.5"/>
+      <circle class="dot${guess && chosen === history.at(-1).month ? ' guess' : ''}" cx="${x(chosenAt)}" cy="${y(chosenWorth)}" r="4.5"/>
       <text x="4" y="127">${monthYear(first)}</text>
       ${years.map(({ year, at }) => `<text x="${x(at)}" y="127" text-anchor="middle">${year}</text>`).join('')}
       <text x="280" y="127" text-anchor="end">${monthYear(end)}</text>
     </svg>`;
 }
 
-// The panel of the month tapped: three figures, a note while the salaries are not all in, and the line to the goal.
-function goalPop(goal, data, history, chosen, pending) {
+// The panel of the month tapped: three figures, a note while salary is still to come (`toCome`), and the line to the goal.
+function goalPop(goal, data, history, chosen, toCome) {
   const each = data.list.find((item) => item.month === chosen);
+  const guess = toCome.cents;
   const end = L(`eind ${monthLong(chosen)}`, `end of ${monthLong(chosen)}`);
+  const span = toCome.months.length > 1 ? `${monthShort(toCome.months[0])}–${monthShort(toCome.months.at(-1))}` : monthShort(toCome.months[0] ?? chosen);
   const rows = {
-    now: [[L('Gespaard tot nu', 'Saved so far'), wholeEuro(each.saved)], [L(`Plan ${end}`, `Plan ${end}`), wholeEuro(data.plan)], [L('Vermogen nu', 'Net worth now'), formatEuro(each.worth)]],
+    now: [guess ? [L('Verwacht gespaard', 'Expected saved'), `≈ ${wholeEuro(each.saved)}`] : [L('Gespaard tot nu', 'Saved so far'), wholeEuro(each.saved)],
+      [L(`Plan ${end}`, `Plan ${end}`), wholeEuro(data.plan)], [L('Vermogen nu', 'Net worth now'), formatEuro(each.worth - guess)]],
     done: [[L('Gespaard', 'Saved'), wholeEuro(each.saved)], [L('Doel', 'Goal'), wholeEuro(goal.monthly)], [L(`Vermogen ${end}`, `Net worth ${end}`), formatEuro(each.worth)]],
     before: [[L('Gespaard', 'Saved'), wholeEuro(each.saved)], [L(`Vermogen ${end}`, `Net worth ${end}`), formatEuro(each.worth)]],
     next: [[L('Te sparen', 'To save'), wholeEuro(goal.monthly)], [L(`Plan ${end}`, `Plan ${end}`), wholeEuro(each.worth)]],
   }[each.kind];
   const [tone, chip] = {
-    now: ['', L('loopt nog', 'running')],
+    now: ['', guess ? L('verwacht', 'expected') : L('loopt nog', 'running')],
     next: ['', L('plan', 'plan')],
     before: [' quiet', L('voor het doel', 'before the goal')],
     done: each.saved >= goal.monthly ? [' met', L('gehaald', 'made it')] : [' quiet', L('onder het doel', 'under the goal')],
@@ -1220,28 +1221,33 @@ function goalPop(goal, data, history, chosen, pending) {
     <section class="goal-pop" data-at="${((data.list.indexOf(each) + 0.5) / data.list.length).toFixed(3)}" aria-label="${monthName(chosen)}">
       <div class="pop-head"><h3>${monthName(chosen)}</h3><span class="chip${tone}">${chip}</span></div>
       <dl class="pop-figures">${rows.map(([name, value]) => `<dt>${name}</dt><dd>${value}</dd>`).join('')}</dl>
-      ${each.kind === 'now' && pending ? `<p class="pop-note">${icon('warn')}${L('Nog niet alle salarissen zijn binnen, dit loopt nog op', 'Not all salaries are in yet, this will still go up')}</p>` : ''}
+      ${each.kind === 'now' && guess ? `<p class="pop-note">${icon('warn')}<span>${L(`Nog niet alle salarissen zijn binnen. Gerekend met ${wholeEuro(guess)} die nog komt: het gemiddelde van ${span} min wat er al is. Zonder: ${wholeEuro(each.saved - guess).replace(' ', '&nbsp;')}.`,
+        `Not all salaries are in yet. Counting ${wholeEuro(guess)} still to come: the average of ${span} less what came in. Without it: ${wholeEuro(each.saved - guess).replace(' ', '&nbsp;')}.`)}</span></p>` : ''}
       <div class="pop-graph-head"><h4>${L('Op weg naar het doel', 'On the way to the goal')}</h4>
         <span>${L(`bij ${wholeEuro(goal.monthly)} p/m`, `at ${wholeEuro(goal.monthly)} a month`)}</span></div>
-      ${goalLine(goal, history, data.base, data.steps, chosen)}
+      ${goalLine(goal, history, data.base, data.steps, chosen, guess)}
     </section>`;
 }
 
 // The card itself; without a goal, a row that sets one.
-function goalCard(month, now) {
+function goalCard(month) {
   const goal = bank.goal;
   const head = `<h2 class="section split-head"><span>${L('Doelen', 'Goals')}</span>${goal ? `<span>${L(`${wholeEuro(goal.monthly)} p/m`, `${wholeEuro(goal.monthly)} a month`)}</span>` : ''}</h2>`;
   if (!goal) return `${head}<div class="group"><button class="row tint" data-action="editGoal">${L('Spaardoel instellen', 'Set a savings goal')}</button></div>`;
   // the line starts where the data does, and at least at the end of last month, where the plan starts
   const first = [monthOf(bank.since || isoDate()), shiftMonth(month, -1)].sort()[0];
-  const data = goalMonths(goal, goalWorth, month, first);
+  // until every salary of the month is in, the month counts what is still to come of the usual salary, shown faint
+  const toCome = salaryToCome(bank, state.purchases, month);
+  const guess = toCome.cents;
+  const worthAt = (each) => goalWorth(each) + (each === month ? guess : 0);
+  const data = goalMonths(goal, worthAt, month, first);
   const chosen = data.list.some((each) => each.month === view.goal) ? view.goal : '';
-  const history = Array.from({ length: monthsFrom(first, month) + 1 }, (unused, index) => shiftMonth(first, index)).map((each) => ({ month: each, worth: goalWorth(each) }));
+  const history = Array.from({ length: monthsFrom(first, month) + 1 }, (unused, index) => shiftMonth(first, index)).map((each) => ({ month: each, worth: worthAt(each) }));
   const next = data.steps.find((step) => step.month);
-  const pending = salaryPending(month, now);
   const kinds = new Set(data.list.map((each) => each.kind));
   const keys = [['before', 'k-before', L('Voor het doel', 'Before the goal')], ['done', 'k-out', L('Gespaard', 'Saved')],
-    ['now', 'k-pots', L('Loopt nog', 'Running')], ['next', 'k-ahead', L('Nog te sparen', 'Still to save')]].filter(([kind]) => kinds.has(kind));
+    ['now', `k-pots${guess ? ' guess' : ''}`, guess ? L('Verwacht', 'Expected') : L('Loopt nog', 'Running')], ['next', 'k-ahead', L('Nog te sparen', 'Still to save')]]
+    .filter(([kind]) => kinds.has(kind));
   return `${head}
     <section class="summary goal">
       <button class="goal-head" data-action="editGoal">
@@ -1249,10 +1255,11 @@ function goalCard(month, now) {
         <span class="row-main"><strong>${esc(goal.name)}</strong><small>${L(`sparen tot ${wholeEuro(goal.steps.at(-1).cents)}`, `saving up to ${wholeEuro(goal.steps.at(-1).cents)}`)}</small></span>
         <span class="goal-next">${next ? `<small>${wholeEuro(next.cents)}</small><b>${monthYear(next.month)}</b>` : `<b>${L('Bereikt', 'Reached')}</b>`}</span>
       </button>
-      <p class="footnote">${L(`Gespaard in ${monthLong(month)}, tot nu`, `Saved in ${monthLong(month)}, so far`)}</p>
-      <p class="total">${wholeEuro(data.list.find((each) => each.kind === 'now').saved)}</p>
-      <p class="footnote">${pending ? L('Nog niet alle salarissen binnen · tik op een maand', 'Not all salaries in yet · tap a month') : L('Tik op een maand voor meer', 'Tap a month for more')}</p>
-      <div class="goal-chart">${goalBars(data.list, chosen, goal.monthly)}${chosen ? goalPop(goal, data, history, chosen, pending) : ''}</div>
+      <p class="footnote">${guess ? L(`Verwacht gespaard in ${monthLong(month)}`, `Expected saved in ${monthLong(month)}`) : L(`Gespaard in ${monthLong(month)}, tot nu`, `Saved in ${monthLong(month)}, so far`)}</p>
+      <p class="total${guess ? ' guess' : ''}">${guess ? '≈ ' : ''}${wholeEuro(data.list.find((each) => each.kind === 'now').saved)}</p>
+      <p class="footnote">${guess ? L(`Met ${wholeEuro(guess)} salaris dat nog komt · tik op een maand`, `With ${wholeEuro(guess)} of salary still to come · tap a month`)
+        : L('Tik op een maand voor meer', 'Tap a month for more')}</p>
+      <div class="goal-chart">${goalBars(data.list, chosen, goal.monthly, guess)}${chosen ? goalPop(goal, data, history, chosen, toCome) : ''}</div>
       <p class="legend goal-legend">${keys.map(([, key, text]) => `<span><i class="key ${key}"></i>${text}</span>`).join('')}</p>
     </section>`;
 }
@@ -1327,7 +1334,7 @@ function overviewScreen() {
   return {
     html: `${title}
       ${fetched}
-      ${goalCard(month, now)}
+      ${goalCard(month)}
       ${balanceCard(month, now, coming)}
       <h2 class="section split-head"><span>${L('Potjes', 'Pots')}</span>${pots().length ? `<span><i class="key today"></i>${L('vandaag', 'today')}</span>` : ''}</h2>
       ${pots().length ? `<div class="summary pots">${pots().map((cat) => potLine(cat, now.byCat.get(cat.id) ?? 0)).join('')}</div>`

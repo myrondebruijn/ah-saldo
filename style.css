@@ -534,6 +534,10 @@ svg.pace { display: block; width: 100%; height: auto; margin-top: .625rem; overf
 .goal-bars .frame { fill: none; stroke: var(--tint); stroke-opacity: .45; stroke-width: 1.5; stroke-dasharray: 3 3; }
 .goal-bars .break { fill: var(--cell); }
 .goal-bars .now-text { fill: var(--link); font-weight: 600; }
+/* counted with salary still to come: faint, and its words grey */
+.total.guess { color: var(--label2); }
+.goal-bars rect.guess, .goal-legend .key.guess { opacity: .45; }
+.goal-bars .now-text.guess { fill: var(--label2); }
 .goal-bars .band { fill: var(--fill); }
 .goal-bars .picked .month { fill: var(--label); font-weight: 700; }
 .goal-bars.has-pick .slot:not(.picked) { opacity: .4; }
@@ -553,8 +557,8 @@ svg.pace { display: block; width: 100%; height: auto; margin-top: .625rem; overf
 .pop-figures { display: grid; grid-template-columns: 1fr auto; gap: .25rem .75rem; margin-top: .625rem; font-size: .8125rem; }
 .pop-figures dt { color: var(--label2); }
 .pop-figures dd { font-weight: 600; text-align: right; }
-.pop-note { display: flex; align-items: center; gap: .375rem; margin-top: .625rem; padding: .375rem .625rem; border-radius: .5rem; background: var(--soon-bg); color: var(--soon); font-size: .75rem; }
-.pop-note .icon { width: .875rem; height: .875rem; }
+.pop-note { display: flex; align-items: flex-start; gap: .375rem; line-height: 1.35; margin-top: .625rem; padding: .375rem .625rem; border-radius: .5rem; background: var(--soon-bg); color: var(--soon); font-size: .75rem; }
+.pop-note .icon { flex: none; width: .875rem; height: .875rem; margin-top: .0625rem; }
 .pop-graph-head { display: flex; justify-content: space-between; align-items: baseline; gap: .75rem; margin-top: .75rem; padding-top: .625rem; border-top: .5px solid var(--line); font-size: .8125rem; }
 .pop-graph-head h4 { margin: 0; font-weight: 600; }
 .pop-graph-head span { color: var(--label2); font-size: .75rem; }
@@ -567,6 +571,7 @@ svg.pace { display: block; width: 100%; height: auto; margin-top: .625rem; overf
 .goal-line .stroke { fill: none; stroke: var(--tint); stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
 .goal-line .plan { stroke: var(--tint); stroke-width: 2.5; stroke-dasharray: 5 5; stroke-linecap: round; }
 .goal-line .dot { fill: var(--tint); stroke: var(--cell); stroke-width: 2; }
+.goal-line .guess { stroke-dasharray: 2 5; opacity: .55; }
 .goal-line .mark { fill: var(--cell); stroke: var(--tint); stroke-width: 2.5; }
 /* a milestone in the goal's sheet: its amount beside its name */
 .step-field { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); }

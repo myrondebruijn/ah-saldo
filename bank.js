@@ -768,6 +768,24 @@ export function salaryBase(bank, purchases, month) {
   return { past, counted, usual };
 }
 
+// A salary is in once one payment of at least this much came from its payer: smaller ones (expenses paid back by the
+// same payer) are not the salary.
+export const SALARY_IN = 200000;
+
+// What of the salary is still to come in `month`: the average (salaryBase) less what came in so far, until every payer
+// that paid a salary in the months of the average has paid one this month; from then on 0, so whatever comes in later
+// simply counts. `cents` is 0 while there is no average; `months` are the ones in it.
+export function salaryToCome(bank, purchases, month) {
+  const { counted, usual } = salaryBase(bank, purchases, month);
+  if (!usual) return { cents: 0, months: [] };
+  const payers = (from, to) => new Set(inCategory(bank, 'salaris', from, to).filter((tx) => tx.cents >= SALARY_IN).map((tx) => ruleKey(tx.name)));
+  const paid = payers(`${month}-01`, `${shiftMonth(month, 1)}-01`);
+  const months = counted.map((each) => each.month);
+  if ([...payers(`${months[0]}-01`, `${month}-01`)].every((key) => paid.has(key))) return { cents: 0, months };
+  const came = inCategory(bank, 'salaris', `${month}-01`, `${shiftMonth(month, 1)}-01`).reduce((sum, tx) => sum + tx.cents, 0);
+  return { cents: Math.max(0, usual - came), months };
+}
+
 // What can still go out of the `pots` this month: each pot's amount less what was `spent` in it (cents per category
 // id) and less what is still to come in it (`held`), never below 0. `held` is a fixed cost that is counted by itself
 // already, so it is not counted twice.

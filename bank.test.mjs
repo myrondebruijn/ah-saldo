@@ -800,3 +800,20 @@ test('a savings goal is saved only in its own shape', () => {
     assert.throws(() => bank.parseBank({ ...data, goal: wrong }));
   }
 });
+
+
+test('the salary still to come: the average less what came in, until every payer paid one salary of 2.000 or more', () => {
+  const salary = (date, cents, name) => tx({ date, cents, name, cat: 'salaris' });
+  const spend = (date) => tx({ date, cents: -5000, cat: 'overig' }); // a month counts when something was spent in it
+  const months = ['2026-08', '2026-09', '2026-10'].flatMap((month) => [salary(`${month}-25`, 400000, 'Werkgever Een BV'),
+    salary(`${month}-30`, 270000, 'Deel'), salary(`${month}-16`, 30000, 'Deel'), spend(`${month}-10`)]);
+  const data = { ...withTxs(...months), since: '2026-08-01' };
+  const toCome = (...lines) => bank.salaryToCome({ ...data, txs: [...data.txs, ...lines] }, [], '2026-11');
+  assert.deepEqual(toCome(), { cents: 700000, months: ['2026-08', '2026-09', '2026-10'] });
+  assert.equal(toCome(salary('2026-11-04', 8100, 'Deel')).cents, 700000 - 8100); // paid back expenses: not the salary
+  assert.equal(toCome(salary('2026-11-25', 420000, 'Werkgever Een BV')).cents, 700000 - 420000); // one of two
+  const both = [salary('2026-11-25', 420000, 'Werkgever Een BV'), salary('2026-11-30', 250000, 'Deel')];
+  assert.equal(toCome(...both).cents, 0); // all in: the real amount counts, though less than the average
+  assert.equal(toCome(...both, salary('2026-11-30', 4000, 'Deel')).cents, 0); // and what comes later counts as it is
+  assert.deepEqual(bank.salaryToCome({ ...data, txs: [] }, [], '2026-11'), { cents: 0, months: [] }); // no average to go by
+});
