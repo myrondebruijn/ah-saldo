@@ -751,3 +751,12 @@ test('data saved before there was investing still reads, and gets its category',
   assert.deepEqual(read.cats.at(-1), { id: 'beleggen', name: 'Beleggen', kind: 'none' });
   assert.equal(bank.parseBank(JSON.parse(JSON.stringify(read))).cats.length, read.cats.length); // added once
 });
+
+test('what is left in the pots: an overspent pot counts as 0 and a fixed cost to come is not counted twice', () => {
+  const pots = [{ id: 'boodschappen', budget: 40000 }, { id: 'uit', budget: 15000 }, { id: 'wonen', budget: 100000 }];
+  const spent = new Map([['boodschappen', 31260], ['uit', 16820], ['wonen', 80000]]);
+  assert.equal(bank.potsLeft(pots, spent), 8740 + 0 + 20000);
+  assert.equal(bank.potsLeft(pots, spent, new Map([['wonen', 15000]])), 8740 + 5000); // the rent to come is in the fixed costs
+  assert.equal(bank.potsLeft(pots, spent, new Map([['wonen', 30000]])), 8740); // more to come than is left: the pot adds nothing
+  assert.equal(bank.potsLeft(pots, new Map()), 155000); // the 1st: every pot whole
+});

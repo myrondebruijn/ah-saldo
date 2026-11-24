@@ -760,6 +760,12 @@ export function salaryBase(bank, purchases, month) {
   return { past, counted, usual };
 }
 
+// What can still go out of the `pots` this month: each pot's amount less what was `spent` in it (cents per category
+// id) and less what is still to come in it (`held`), never below 0. `held` is a fixed cost that is counted by itself
+// already, so it is not counted twice.
+export const potsLeft = (pots, spent, held = new Map()) =>
+  pots.reduce((sum, cat) => sum + Math.max(0, cat.budget - (spent.get(cat.id) ?? 0) - (held.get(cat.id) ?? 0)), 0);
+
 // ---------- planned payments ----------
 // A payment the user knows is coming: bank.planned = [{ id, name, cents, date, since }]. `cents` is what it will
 // cost, `date` the day it is expected and `since` the day it was planned. It belongs to the month of its date.

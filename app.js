@@ -5,7 +5,7 @@ import {
 } from './logic.js';
 import {
   AH, LARGE, START_CATS, US, addBalance, addFile, addStarter, balanceOn, byParty, cardsOn, cardsToAdd, catchUp, decodeText, dayRate, dueOn, emptyBank, ended, figures, fixedCosts,
-  fixedSuggestions, forWhom, giftGuesses, giftsBought, giftsToFill, hasGap, heldShops, inCategory, monthOf, parseBank, payFrom, plannedOpen, readCsv, salaryBase,
+  fixedSuggestions, forWhom, giftGuesses, giftsBought, giftsToFill, hasGap, heldShops, inCategory, monthOf, parseBank, payFrom, plannedOpen, potsLeft, readCsv, salaryBase,
   addLinked, bought, deposits, holdings, invested, isTrade, readLinked, readOpenbank, ruleKey, shiftMonth, sortAll, sorter, strayDeposits, tie,
 } from './bank.js';
 import {
@@ -954,9 +954,9 @@ function outlook(month, spent, open) {
   const days = daysIn(month);
   const today = isoDate();
   const due = !open ? [] : [
-    ...fixed.costs.filter((cost) => !cost.paid && cost.expected).map((cost) => ({ cost, date: expectedOn(cost, month) })).map(({ cost, date }) => ({
-      date, name: cost.name, cents: cost.expected, late: date < today,
-      note: date < today ? L('Nog niet afgeschreven', 'Not charged yet') : catName(catOf(lastPaid(cost.key))) })),
+    ...fixed.costs.filter((cost) => !cost.paid && cost.expected).map((cost) => ({ cost, date: expectedOn(cost, month), cat: catOf(lastPaid(cost.key)) }))
+      .map(({ cost, date, cat }) => ({ date, name: cost.name, cents: cost.expected, late: date < today, cat,
+        note: date < today ? L('Nog niet afgeschreven', 'Not charged yet') : catName(cat) })),
     ...plannedOpen(bank, isoDate()).map((plan) => ({ ...plan, note: L('Gepland', 'Planned') })),
   ].sort((a, b) => a.date.localeCompare(b.date));
   const coming = due.filter((each) => monthOf(each.date) === month);
@@ -1009,7 +1009,56 @@ function spark(values) {
     <polyline points="${points.map((point) => point.map((each) => each.toFixed(1)).join(',')).join(' ')}"/><circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4"/></svg>`;
 }
 
-// The top of Overview: what will probably be left of the salary when the month is over. The salary is the average of
+// how many days `month` still has after today
+function daysLeftText(month) {
+  const rest = daysIn(month) - Number(isoDate().slice(8));
+  return !rest ? L('laatste dag', 'last day') : rest === 1 ? L('nog 1 dag', '1 day left') : L(`nog ${rest} dagen`, `${rest} days left`);
+}
+
+// The top of Overview: what is on the Rabo current account now, and in a ring what of it still goes out this month:
+// for sure the fixed costs and plans still to come (`coming`, together `waiting`), and at worst what is left in the
+// pots, when every pot is used up. The rest of the ring is the rest of the balance. No Rabo account, no card.
+function balanceCard(month, now, { coming, waiting }) {
+  const lines = (account) => bank.txs.filter((tx) => tx.acc === account.id).length;
+  const rabo = bank.accounts.filter((account) => account.bank === 'Rabo' && !account.card && !account.shop)
+    .sort((a, b) => lines(b) - lines(a))[0]; // the current account: it has the most lines
+  if (!rabo) return '';
+  const held = new Map(); // a fixed cost to come in a pot's category is in that pot's rest as well
+  for (const each of coming) if (each.cat) held.set(each.cat, (held.get(each.cat) ?? 0) + each.cents);
+  const inPots = potsLeft(pots(), now.byCat, held);
+  const cash = balanceOn(bank, rabo);
+  const worst = waiting + inPots;
+  const whole = Math.max(cash, worst, 1); // the ring is the balance, or all there is to pay when that is more
+  const round = 2 * Math.PI * 54;
+  let at = 0;
+  const arcs = [['r-sure', waiting], ['r-pots', inPots], ['r-rest', whole - worst]].filter(([, cents]) => cents > 0).map(([name, cents], index, all) => {
+    const length = cents / whole * round;
+    const gap = all.length > 1 ? Math.min(4, length / 2) : 0;
+    at += length;
+    return `<circle class="${name}" cx="66" cy="66" r="54"${name === 'r-pots' ? ' stroke="url(#pot-hatch)"' : ''} stroke-dasharray="${(length - gap).toFixed(2)} ${(round - length + gap).toFixed(2)}" stroke-dashoffset="${(length - at).toFixed(2)}"/>`;
+  });
+  return `
+    <a class="summary" href="#/vast">
+      <div class="summary-top">
+        <p class="footnote">${esc(rabo.name)}</p>
+        <p class="footnote">${daysLeftText(month)}</p>
+      </div>
+      <p class="total">${formatEuro(cash)}</p>
+      <div class="to-pay">
+        <div class="ring">
+          <svg viewBox="0 0 132 132" aria-hidden="true"><defs><pattern id="pot-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+            <rect class="hatch-bg" width="6" height="6"/><rect class="hatch-line" width="2.5" height="6"/></pattern></defs>${arcs.join('')}</svg>
+          <p><span>${L('nog te betalen', 'still to pay')}</span><strong${worst > cash ? ' class="over-text"' : ''}>${wholeEuro(worst)}</strong><span>worst case</span></p>
+        </div>
+        <ul class="ring-key">
+          <li><i class="key k-out"></i><span>${coming.length ? L(`Vast · ${coming.length} open`, `Fixed · ${coming.length} open`) : L('Vast', 'Fixed')}<strong>${formatEuro(waiting)}</strong></span></li>
+          <li><i class="key k-pots"></i><span>${L('Potjes, nog over', 'Left in pots')}<strong>${formatEuro(inPots)}</strong></span></li>
+        </ul>
+      </div>
+    </a>`;
+}
+
+// The card under the pots: what will probably be left of the salary when the month is over. The salary is the average of
 // the three months before (salaryBase), so it moves on every month. Under the bar the salaries themselves, with the
 // months the average takes marked. `now` is this month's figures. Without a salary to go by it is what was spent and
 // what came in.
@@ -1026,7 +1075,6 @@ function salaryCard(month, now, { waiting, sure, ahead }) {
       </a>`;
   }
   const left = usual - ahead;
-  const rest = daysIn(month) - Number(isoDate().slice(8));
   const share = (cents) => `${Math.round(cents / usual * 100)}%`;
   const end = (cents) => Math.min(Math.max(cents, 0) / usual, 1) * 100; // where on the bar an amount reaches
   const parts = [['out', 0, end(now.spending)], ['sure', end(now.spending), end(sure)], ['ahead', end(sure), end(ahead)]].filter(([, from, to]) => to > from);
@@ -1042,7 +1090,7 @@ function salaryCard(month, now, { waiting, sure, ahead }) {
       <div class="summary-top">
         <p class="footnote">${left < 0 ? L(`Verwacht tekort eind ${monthLong(month)}`, `Expected short at the end of ${monthLong(month)}`)
           : L(`Verwacht over eind ${monthLong(month)}`, `Expected left at the end of ${monthLong(month)}`)}</p>
-        <p class="footnote">${!rest ? L('laatste dag', 'last day') : rest === 1 ? L('nog 1 dag', '1 day left') : L(`nog ${rest} dagen`, `${rest} days left`)}</p>
+        <p class="footnote">${daysLeftText(month)}</p>
       </div>
       <p class="total${left < 0 ? ' over-text' : ''}">${wholeEuro(Math.abs(left))}</p>
       <p class="footnote">${L(`van je gemiddelde salaris van ${wholeEuro(usual)}`, `of your average salary of ${wholeEuro(usual)}`)}</p>
@@ -1136,14 +1184,15 @@ function overviewScreen() {
   return {
     html: `${title}
       ${fetched}
+      ${balanceCard(month, now, coming)}
+      <h2 class="section split-head"><span>${L('Potjes', 'Pots')}</span>${pots().length ? `<span><i class="key today"></i>${L('vandaag', 'today')}</span>` : ''}</h2>
+      ${pots().length ? `<div class="summary pots">${pots().map((cat) => potLine(cat, now.byCat.get(cat.id) ?? 0)).join('')}</div>`
+        : `<div class="group"><a class="row tint" href="#/potjes">${L('Kies een bedrag per maand voor een potje', 'Choose an amount per month for a pot')}</a></div>`}
       ${salaryCard(month, now, coming)}
       ${todos.length ? `
         <h2 class="section split-head"><span>${L('Te doen', 'To do')}</span><span>${todos.length}</span></h2>
         <ul class="group todos">${todos.join('')}</ul>` : ''}
       ${pushNotice()}
-      <h2 class="section split-head"><span>${L('Potjes', 'Pots')}</span>${pots().length ? `<span><i class="key today"></i>${L('vandaag', 'today')}</span>` : ''}</h2>
-      ${pots().length ? `<div class="summary pots">${pots().map((cat) => potLine(cat, now.byCat.get(cat.id) ?? 0)).join('')}</div>`
-        : `<div class="group"><a class="row tint" href="#/potjes">${L('Kies een bedrag per maand voor een potje', 'Choose an amount per month for a pot')}</a></div>`}
       <h2 class="section split-head"><span>${L('Wat nog komt', 'Still to come')}</span><span>${waiting ? formatEuro(waiting) : ''}</span></h2>
       <ul class="group dated">
         ${due.map(dueRow).join('')}
