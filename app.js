@@ -713,13 +713,14 @@ function columnChart(periods, action, kind = '') {
   }).join('')}</ul>`;
 }
 
-// Two columns per month, money in beside money out, on one scale. The chosen month stands out; a tap chooses another.
-function flowChart(months, chosen) {
-  const sums = months.map((month) => ({ month, ...monthFigures(month) }));
-  const most = Math.max(0, ...sums.flatMap((sum) => [sum.income, sum.spending]));
+// Two columns per month on one scale, by default money in beside money out. The chosen month stands out; a tap
+// chooses another. `pair(month)` gives the two amounts, the left one green, and `keys` their names.
+function flowChart(months, chosen, pair = (month) => [monthFigures(month).income, monthFigures(month).spending], keys = [L('In', 'In'), L('Uit', 'Out')]) {
+  const sums = months.map((month) => [month, ...pair(month)]);
+  const most = Math.max(0, ...sums.flatMap(([, income, spending]) => [income, spending]));
   return `
-    <ul class="columns flow">${sums.map(({ month, income, spending }) => {
-      const label = `${monthName(month)}: ${L('in', 'in')} ${formatEuro(income)}, ${L('uit', 'out')} ${formatEuro(spending)}`;
+    <ul class="columns flow">${sums.map(([month, income, spending]) => {
+      const label = `${monthName(month)}: ${keys[0].toLowerCase()} ${formatEuro(income)}, ${keys[1].toLowerCase()} ${formatEuro(spending)}`;
       return `
         <li><button class="column" data-action="pickMonth" data-id="${month}" aria-pressed="${month === chosen}" aria-label="${label}" title="${label}">
           <svg viewBox="0 0 24 92" preserveAspectRatio="none" aria-hidden="true">
@@ -727,7 +728,7 @@ function flowChart(months, chosen) {
           <span>${monthShort(month)}</span>
         </button></li>`;
     }).join('')}</ul>
-    <p class="legend"><span><i class="key in"></i>${L('In', 'In')}</span><span><i class="key out"></i>${L('Uit', 'Out')}</span></p>`;
+    <p class="legend"><span><i class="key in"></i>${keys[0]}</span><span><i class="key out"></i>${keys[1]}</span></p>`;
 }
 
 // A line through one amount per month. points: [{ id, name, cents }]; a tap on a month chooses it.
@@ -770,7 +771,7 @@ function txRow(tx, catOf, { category = true, account = true, toFill } = {}) {
   const cat = catOf(tx);
   const till = tillOf(tx, cat); // then who it was for is the purchase's to say
   const others = cat === 'boodschappen' && !till ? (tx.shares ?? []).filter((share) => share.who !== US).map((share) => esc(shown(share.who))) : [];
-  const gift = tx.gift ? `${esc(tx.gift.shop)} ${formatEuro(tx.gift.value)}${cat !== 'cadeaukaarten' || !heldShops(bank).has(tx.gift.shop) ? ''
+  const gift = tx.gift ? `${cat === 'cadeaukaarten' ? '' : `${L('cadeaukaart', 'gift card')} `}${esc(tx.gift.shop)} ${formatEuro(tx.gift.value)}${cat !== 'cadeaukaarten' || !heldShops(bank).has(tx.gift.shop) ? ''
     : ` · ${tx.gift.shop === AH ? L('op de kaart', 'on the card') : L('op het saldo', 'on the balance')}`}`
     : toFill?.has(tx.id) ? `<span class="todo">${L('winkel invullen', 'fill in the shop')}</span>` : '';
   return `
@@ -1444,12 +1445,15 @@ function categoryScreen(id) {
   const size = (party) => (cat && cat.kind !== 'none' ? Math.max(0, sign * party.cents) : Math.abs(party.cents));
   const whole = Math.max(1, fromCards + parties.reduce((sum, party) => sum + size(party), 0)); // the bars are shares of this
   const months = Array.from({ length: 6 }, (unused, index) => shiftMonth(view.month >= shiftMonth(thisMonth(), -5) ? thisMonth() : view.month, index - 5));
+  const gifts = cat?.id === 'cadeaukaarten'; // everything here was paid to the shop that sells the cards: the shops the cards are for say more
+  // a card sorted into another category still counts in what the cards bought and saved, so it is listed here too, with its category
+  const elsewhere = gifts ? bank.txs.filter((tx) => tx.gift && tx.date >= since && tx.date < to && catOf(tx) !== cat.id) : [];
   const rows = [
     ...tills.map((purchase) => [dayOf(purchase), () => tillRow(purchase)]),
     ...txs.filter((tx) => !inTill.has(tx.id)).map((tx) => [tx.date, () => txRow(tx, catOf, { category: false, toFill })]),
+    ...elsewhere.map((tx) => [tx.date, () => txRow(tx, catOf)]),
   ].sort((a, b) => b[0].localeCompare(a[0]));
   const shownRows = rows.slice(0, view.rows);
-  const gifts = cat?.id === 'cadeaukaarten'; // everything here was paid to the shop that sells the cards: the shops the cards are for say more
   const toFill = giftIds();
   return {
     html: `
@@ -1463,7 +1467,11 @@ function categoryScreen(id) {
           ${monthStepper()}
           <p class="total">${cat.kind === 'none' ? signed(total) : formatEuro(total)}</p>
           ${cat.budget ? `<ul class="plain">${potRow(cat, total, view.month).replace('<a class="row meter-row" href', '<a class="row meter-row bare" href')}</ul>` : ''}
-          ${cat.kind === 'none' ? '' : columnChart(months.map((month) => ({
+          ${gifts ? flowChart(months, view.month, (month) => {
+            const sum = giftSum(giftsBought(bank, ...monthRange(month)));
+            return [sum.value - sum.paid, sum.value];
+          }, [L('Bespaard', 'Saved'), L('Gekocht', 'Bought')])
+          : cat.kind === 'none' ? '' : columnChart(months.map((month) => ({
             id: month, name: monthName(month), short: monthShort(month), total: Math.max(0, monthFigures(month).byCat.get(cat.id) ?? 0), chosen: month === view.month,
           })), 'pickMonth')}
         </section>`
