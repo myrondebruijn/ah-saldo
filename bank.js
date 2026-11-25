@@ -325,17 +325,6 @@ export function readLinked(list) {
       });
     }
   }
-  // A Trade Republic line names no other account. When this fetch holds a line of another account that went to or
-  // came from it, the same amount the other way within three days, it is that transfer between own accounts.
-  // shortcut: pairs only within one fetch; a line whose other side came in another fetch is sorted by hand.
-  const paired = new Set();
-  for (const tx of txs.filter((each) => accounts.some((account) => account.id === each.acc && account.bank === 'Trade Republic'))) {
-    const other = txs.find((each) => each.iban === tx.acc && each.cents === -tx.cents && !paired.has(each)
-      && Math.abs(Date.parse(each.date) - Date.parse(tx.date)) <= 3 * 864e5);
-    if (!other) continue;
-    paired.add(other);
-    Object.assign(tx, { name: accounts.find((account) => account.id === other.acc).name, iban: other.acc });
-  }
   if (!txs.every(isTx) || !accounts.every(isAccount)) throw broken();
   return { accounts, txs };
 }
@@ -431,12 +420,31 @@ export const sellsCards = (tx) => known(ruleKey(tx.name)) === 'cadeaukaarten';
 export function sorter(bank) {
   const own = new Set(bank.accounts.map((account) => account.id));
   const cats = new Set(bank.cats.map((cat) => cat.id));
+  const moves = tradeMoves(bank);
   return (tx) => {
     const key = ruleKey(tx.name);
-    const cat = tx.cat ?? bank.rules[key]
+    const cat = tx.cat ?? (moves.has(tx) ? 'overboeking' : undefined) ?? bank.rules[key]
       ?? (tx.own || own.has(tx.iban) ? 'overboeking' : known(key));
     return cats.has(cat) ? cat : '';
   };
+}
+
+// The lines that move money between Trade Republic and another own account. A Trade Republic line names nobody, so
+// a move is found from the other side: a line to or from its IBAN, or a card payment to Trade Republic (a top-up).
+// Its Trade Republic side is a line the other way within three days, of the same amount give or take the card's fee
+// (up to 2%; the fee then counts as moved, not spent). Each line is one side of one move at most.
+function tradeMoves(bank) {
+  const trade = new Set(bank.accounts.filter((account) => account.bank === 'Trade Republic').map((account) => account.id));
+  const moves = new Set();
+  if (!trade.size) return moves;
+  const sides = bank.txs.filter((tx) => trade.has(tx.acc));
+  for (const other of bank.txs.filter((tx) => !trade.has(tx.acc) && (trade.has(tx.iban) || ruleKey(tx.name).startsWith('trade republic')))) {
+    moves.add(other);
+    const side = sides.find((tx) => !moves.has(tx) && Math.sign(tx.cents) === -Math.sign(other.cents)
+      && Math.abs(tx.cents + other.cents) <= Math.abs(other.cents) * 0.02 && Math.abs(Date.parse(tx.date) - Date.parse(other.date)) <= 3 * 864e5);
+    if (side) moves.add(side);
+  }
+  return moves;
 }
 
 // Sorts everything of `tx`'s counterparty: the rule for its name becomes `cat` ('' takes the rule away) and no line

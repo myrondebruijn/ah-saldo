@@ -230,25 +230,32 @@ test('the Rabo link gives the lines of the CSV the same ids and texts, so only n
   assert.throws(() => bank.readLinked([{ ...LINKED[0], txs: [{ ...LINKED[0].txs[0], transaction_amount: { amount: '4,00' } }] }]), /broken/);
 });
 
-test('a Trade Republic line, which says only its day and amount, is known by them and paired with the other side of a transfer', () => {
+test('a Trade Republic line, which says only its day and amount, is known by them; moves from an own account are transfers', () => {
   const TR = 'NL00TRBK0000000001';
   const line = (date, amount, indicator, status = 'BOOK') => ({ entry_reference: null, status, booking_date: date, credit_debit_indicator: indicator,
     transaction_amount: { currency: 'EUR', amount }, remittance_information: null }); // as the real link sends it, 2026-11-25
-  const list = [{ ...LINKED[0], txs: [linked(21, '2026-07-02', '500.00', 'DBIT', 'A Test', { iban: TR, code: 'tb' })] },
-    { iban: TR, bank: 'Trade Republic', holder: 'A Test', balances: [{ balance_type: 'OTHR', balance_amount: { amount: '520' } }],
-      txs: [line('2026-07-03', '500.000000', 'CRDT'), line('2026-07-01', '10.000000', 'CRDT'), line('2026-07-01', '10.000000', 'CRDT'), line('2026-07-03', '5.00', 'DBIT', 'PDNG')] }];
+  const list = [{ ...LINKED[0], txs: [
+    linked(21, '2026-07-02', '500.00', 'DBIT', 'A Test', { iban: TR, code: 'tb' }), // a transfer to its IBAN
+    linked(22, '2026-07-01', '10.10', 'DBIT', 'Trade Republic', { code: 'ba', text: 'Berlin, 10119, DEU' }), // a card top-up, with a fee of 1%
+  ] }, { iban: TR, bank: 'Trade Republic', holder: 'A Test', balances: [{ balance_type: 'OTHR', balance_amount: { amount: '521.23' } }],
+    txs: [line('2026-07-03', '500.000000', 'CRDT'), line('2026-07-01', '10.000000', 'CRDT'), line('2026-07-01', '10.000000', 'CRDT'),
+      line('2026-07-01', '1.230000', 'CRDT'), line('2026-07-03', '5.00', 'DBIT', 'PDNG')] }];
   const file = bank.readLinked(list);
-  assert.deepEqual(file.accounts[1], { id: TR, name: 'Trade Republic 0001', bank: 'Trade Republic', balance: 52000 });
-  assert.deepEqual(file.txs.filter((tx) => tx.acc === TR), [
-    { id: `${TR}.2026-07-03.50000.1`, acc: TR, date: '2026-07-03', cents: 50000, name: 'Rabo 6789', text: '', iban: 'NL00TEST0123456789' },
-    { id: `${TR}.2026-07-01.1000.1`, acc: TR, date: '2026-07-01', cents: 1000, name: 'Trade Republic', text: '' },
-    { id: `${TR}.2026-07-01.1000.2`, acc: TR, date: '2026-07-01', cents: 1000, name: 'Trade Republic', text: '' },
+  assert.deepEqual(file.accounts[1], { id: TR, name: 'Trade Republic 0001', bank: 'Trade Republic', balance: 52123 });
+  assert.deepEqual(file.txs.filter((tx) => tx.acc === TR).map((tx) => [tx.id, tx.name]), [
+    [`${TR}.2026-07-03.50000.1`, 'Trade Republic'], [`${TR}.2026-07-01.1000.1`, 'Trade Republic'], [`${TR}.2026-07-01.1000.2`, 'Trade Republic'], [`${TR}.2026-07-01.123.1`, 'Trade Republic'],
   ]);
   const data = loaded();
-  assert.equal(bank.addLinked(data, file, NOW).added, 4);
+  assert.equal(bank.addLinked(data, file, NOW).added, 6);
   assert.equal(bank.addLinked(data, bank.readLinked(list), NOW).added, 0); // the same days again add nothing
   const catOf = bank.sorter(data);
-  assert.deepEqual(data.txs.filter((tx) => tx.cents === 50000 || tx.cents === -50000).map(catOf), ['overboeking', 'overboeking']);
+  const sorted = Object.fromEntries(data.txs.filter((tx) => tx.id.includes('.2026-07-0') || /\.2[12]$/.test(tx.id)).map((tx) => [tx.id.replace(/^\w+\./, ''), catOf(tx)]));
+  assert.deepEqual(sorted, {
+    21: 'overboeking', 22: 'overboeking', '2026-07-03.50000.1': 'overboeking', '2026-07-01.1000.1': 'overboeking',
+    '2026-07-01.1000.2': '', '2026-07-01.123.1': '', // one top-up, so the second 10 is not one; the interest is to be sorted
+  });
+  bank.sortAll(data, data.txs.find((tx) => tx.id.endsWith('.123.1')), 'salaris'); // sorting all of "Trade Republic" leaves the moves alone
+  assert.equal(bank.sorter(data)(data.txs.find((tx) => tx.id.endsWith('.22'))), 'overboeking');
   assert.throws(() => bank.readLinked([{ ...list[1], txs: [line('2026-07-03', '5.005', 'DBIT')] }]), /broken/);
 });
 
