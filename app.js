@@ -1275,7 +1275,7 @@ function overviewScreen() {
   const gaps = bank.accounts.filter((account) => hasGap(bank, account));
   const title = `
     <header class="large-title">
-      <h1>Kassa</h1>
+      <h1>Kassa${version && ` <small class="version">${version}</small>`}</h1>
       <a class="round plain" href="#/meer" aria-label="${L('Instellingen', 'Settings')}">${icon('gear')}</a>
     </header>`;
   const cards = `
@@ -3637,6 +3637,12 @@ if (lang === 'en') {
 
 navigator.storage?.persist?.(); // ask the browser not to evict the cards
 navigator.serviceWorker?.register('sw.js');
+// The version by Overview's title: the name of the saved set of files, which every release changes (sw.js)
+let version = '';
+globalThis.caches?.keys().then((names) => {
+  version = names.find((name) => /^kassa-v\d+$/.test(name))?.slice(6) ?? '';
+  if (version && route() === '') render();
+}).catch(() => {});
 // A newer Kassa was saved on the phone while this one was open: start it, unless that would break off a payment or a sheet.
 if (navigator.serviceWorker?.controller) {
   navigator.serviceWorker.addEventListener('controllerchange', () => busy() || ['betalen', 'kaart'].includes(route()) || location.reload());

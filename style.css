@@ -73,6 +73,7 @@ body:has(#dock:not([hidden])) main { padding-bottom: calc(7.5rem + env(safe-area
 /* ---------- bars ---------- */
 .large-title { display: flex; align-items: center; justify-content: space-between; padding: 1.75rem .25rem .375rem; }
 .large-title h1 { font-size: 2.125rem; line-height: 1.2; font-weight: 700; letter-spacing: -.02em; }
+.large-title .version { font-size: .8125rem; font-weight: 500; letter-spacing: 0; color: var(--label2); }
 .round { position: relative; display: grid; place-items: center; width: 2.25rem; height: 2.25rem; border-radius: 50%; background: var(--tint); color: #fff; }
 .round::after { content: ""; position: absolute; inset: -.25rem; } /* 44px touch target */
 
