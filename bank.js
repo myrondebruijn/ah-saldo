@@ -113,6 +113,9 @@ function readRabo(rows) {
   return checked({ accounts: [...accounts.values()].map((each) => each.account), txs });
 }
 
+// topping the card up and settling the last statement are the other side of the account's 'cc' lines
+const CARD_OWN = /^(bijschrijving saldo|verrekening vorig overzicht)/i;
+
 // The Rabo export of a credit card ("RA_CC_..."). Each line has its own reference; there is no balance.
 function readCard(rows) {
   const accounts = new Map();
@@ -124,11 +127,44 @@ function readCard(rows) {
       id: `${acc}.${row.Transactiereferentie}`, acc, date: row.Datum, cents: bankCents(row.Bedrag),
       name: (name || '?').slice(0, 60),
       text: row['Oorspr munt'] ? `${row['Oorspr bedrag']} ${row['Oorspr munt']}` : '',
-      // topping the card up and settling the last statement are the other side of the account's 'cc' lines
-      ...(/^(bijschrijving saldo|verrekening vorig overzicht)/i.test(name) && { own: true }),
+      ...(CARD_OWN.test(name) && { own: true }),
     };
   });
   return checked({ accounts: [...accounts.values()], txs });
+}
+
+// The Rabo credit card statement as a PDF (what the phone app downloads). A line is a date, its description and
+// an amount at one height. It has no reference, so its id is made from what it says (as Openbank's), and addFile
+// matches it to the CSV's lines by day and amount. The statement's totals must follow from its lines.
+// shortcut: a description that wraps onto a second line loses that part; read the words below a line if one ever does.
+function readCardPdf(texts) {
+  const number = texts.map((item) => /^\*{4} \*{4} \*{4} (\d{4})$/.exec(item.str)).find(Boolean)?.[1];
+  const heads = texts.filter((item) => item.str === 'Transactiedatum');
+  if (!number || !heads.length) throw new Error('unknown');
+  const acc = `CC${number}`;
+  const title = texts.findIndex((item) => item.str === 'Transactieoverzicht');
+  const product = title >= 0 ? texts[title + 1]?.str ?? '' : ''; // "Rabo GoldCard Visa", just under the title
+  const near = (a, b) => a.page === b.page && Math.abs(a.y - b.y) < 1.5;
+  const isMoney = (item) => /^-?\d{1,3}(\.\d{3})*,\d{2}$/.test(item.str);
+  const seen = new Map();
+  const txs = texts.filter((item) => /^\d{2}-\d{2}-\d{4}$/.test(item.str) && heads.some((head) => Math.abs(head.x - item.x) < 2))
+    .map((first) => {
+      const level = texts.filter((item) => item !== first && near(item, first)).sort((a, b) => a.x - b.x);
+      const amount = level.at(-1);
+      if (!amount || !isMoney(amount)) throw broken();
+      const name = tidy(level.slice(0, -1).map((item) => item.str).join(' ')) || '?';
+      const date = first.str.split('-').reverse().join('-');
+      const cents = bankCents(amount.str);
+      const mark = `${date}.${cents}.${hash(name)}`;
+      seen.set(mark, (seen.get(mark) ?? -1) + 1);
+      return { id: `${acc}.${mark}.${seen.get(mark)}`, acc, date, cents, name: name.slice(0, 60), text: '', ...(CARD_OWN.test(name) && { own: true }) };
+    });
+  // "Totaal bijgeschreven" and "Totaal afgeschreven" (the first wraps after "Totaal"): the credits and the debits
+  const totals = texts.filter((item) => isMoney(item) && texts.some((label) => label.str.startsWith('Totaal') && near(label, item)))
+    .map((item) => Math.abs(bankCents(item.str))).sort((a, b) => a - b);
+  const sum = (sign) => Math.abs(txs.reduce((all, tx) => all + (Math.sign(tx.cents) === sign ? tx.cents : 0), 0));
+  if (totals.join() !== [sum(1), sum(-1)].sort((a, b) => a - b).join()) throw broken();
+  return checked({ accounts: [{ id: acc, name: product.slice(0, 30).trim() || acc, bank: 'Rabo', card: true }], txs });
 }
 
 export function readCsv(text) {
@@ -195,6 +231,12 @@ export function readOpenbank(items) {
     accounts: [{ id: iban, name: `Openbank ${iban.slice(-4)}`, bank: 'Openbank', balance: lines.at(-1).after, ...(holder && { holder: holder.slice(0, 30) }) }],
     txs,
   });
+}
+
+// A PDF statement, the Rabo credit card's or Openbank's: its pieces of text with their place, { page, x, y, str }.
+export function readPdf(items) {
+  const texts = items.map((item) => ({ ...item, str: tidy(item.str) })).filter((item) => item.str);
+  return texts.some((item) => item.str === 'Kaartnummer') ? readCardPdf(texts) : readOpenbank(items);
 }
 
 // Openbank lines, oldest first: { date, cents, after (the balance after it), concept (its description) }. The
@@ -301,7 +343,19 @@ export function addLinked(bank, file, now) {
 // A transaction that is already there (same id) is left alone, so files may overlap or be read twice.
 export function addFile(bank, file, now) {
   const known = new Set(bank.txs.map((tx) => tx.id));
-  const fresh = file.txs.filter((tx) => !known.has(tx.id));
+  // A card's line has a reference in the CSV and none in the PDF, so its id differs between the two. A new card
+  // line is only added while the file holds more lines of that day and amount than are saved already.
+  const cards = new Set([...bank.accounts, ...file.accounts].filter((account) => account.card).map((account) => account.id));
+  const key = (tx) => `${tx.acc} ${tx.date} ${tx.cents}`;
+  const room = new Map();
+  for (const tx of file.txs) if (cards.has(tx.acc)) room.set(key(tx), (room.get(key(tx)) ?? 0) + 1);
+  for (const tx of bank.txs) if (room.has(key(tx))) room.set(key(tx), room.get(key(tx)) - 1);
+  const fresh = file.txs.filter((tx) => {
+    if (known.has(tx.id)) return false;
+    if (!cards.has(tx.acc)) return true;
+    room.set(key(tx), room.get(key(tx)) - 1);
+    return room.get(key(tx)) >= 0;
+  });
   bank.txs.push(...fresh);
   for (const { balance, ...account } of file.accounts) {
     const through = file.txs.filter((tx) => tx.acc === account.id).reduce((latest, tx) => (tx.date > latest ? tx.date : latest), '');

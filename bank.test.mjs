@@ -58,6 +58,33 @@ const OPENBANK = [
   ['2026-07-01', ['OVERBOEKING VAN Werkgever B. V., REFERENTIE', '0726-SALARY-Werkgever', 'B 123'], '364.88', '364.88'],
 ];
 
+// ---------- a made-up Rabo credit card statement (PDF), as the pieces of text a PDF reader hands over ----------
+// Each line is [date, description pieces, amount]; `totals` are what the statement says was credited and debited.
+function cardStatement(lines, totals) {
+  const items = [
+    { page: 1, x: 96.1, y: 780.8, str: 'Transactieoverzicht' }, { page: 1, x: 96.1, y: 759.7, str: 'Rabo TestCard' },
+    { page: 1, x: 40.6, y: 530.8, str: 'Kaartnummer' }, { page: 1, x: 96.1, y: 530.8, str: '**** **** **** 9999' },
+    { page: 1, x: 31.3, y: 503.9, str: 'Datum overzicht' }, { page: 1, x: 96.1, y: 503.9, str: '06-07-2026' },
+    { page: 1, x: 396.1, y: 544.3, str: 'Totaal' }, { page: 1, x: 369.7, y: 530.8, str: 'bijgeschreven' }, { page: 1, x: 426, y: 544.3, str: totals[0] },
+    { page: 1, x: 349.6, y: 517.8, str: 'Totaal afgeschreven' }, { page: 1, x: 426, y: 517.8, str: totals[1] },
+    { page: 1, x: 39.1, y: 450.9, str: 'Transactiedatum' }, { page: 1, x: 130.4, y: 450.9, str: 'Omschrijving/naam' }, { page: 1, x: 527.9, y: 450.9, str: 'Bedrag €' },
+    { page: 1, x: 96.1, y: 31.2, str: '06-07-2026 23:28 | J. JANSEN' },
+  ];
+  lines.forEach(([date, pieces, amount], index) => {
+    const y = 429.9 - index * 22.45;
+    items.push({ page: 1, x: 39.1, y, str: date }, { page: 1, x: 530.3, y, str: amount });
+    pieces.forEach((str, at) => items.push({ page: 1, x: 130.4 + at * 70, y, str }));
+  });
+  return items;
+}
+const CARD_PDF = [
+  ['02-07-2026', ['HOTEL VOORBEELD', 'PARIS', 'FR'], '-2.058,80'],
+  ['03-07-2026', ['SOFTWARE INC', 'NEW YORK US'], '-8,69'],
+  ['04-07-2026', ['Verrekening vorig overzicht'], '200,00'],
+  ['05-07-2026', ['Koersopslag'], '-0,18'],
+  ['05-07-2026', ['Koersopslag'], '-0,18'],
+];
+
 const loaded = () => {
   const data = bank.emptyBank();
   bank.addFile(data, bank.readCsv(RABO), NOW);
@@ -112,6 +139,28 @@ test('a credit card file gives transactions keyed by reference', () => {
   assert.equal(bank.balanceOn(data, data.accounts[0]), -205880 - 869 + 20000); // no balance in the file: the sum of its lines
 });
 
+test('a credit card statement PDF gives the CSV lines, matched to them by day and amount', () => {
+  const file = bank.readPdf(cardStatement(CARD_PDF, ['200,00', '2.067,85']));
+  assert.deepEqual(file.accounts, [{ id: 'CC9999', name: 'Rabo TestCard', bank: 'Rabo', card: true }]);
+  assert.deepEqual(file.txs.map((each) => [each.date, each.cents, each.name]), [
+    ['2026-07-02', -205880, 'HOTEL VOORBEELD PARIS FR'], ['2026-07-03', -869, 'SOFTWARE INC NEW YORK US'], ['2026-07-04', 20000, 'Verrekening vorig overzicht'],
+    ['2026-07-05', -18, 'Koersopslag'], ['2026-07-05', -18, 'Koersopslag'],
+  ]);
+  assert.equal(file.txs[2].own, true);
+  assert.equal(new Set(file.txs.map((each) => each.id)).size, 5); // the two equal lines of 5 July keep apart
+  assert.throws(() => bank.readPdf(cardStatement(CARD_PDF, ['200,00', '2.067,67'])), /broken/); // a line missing
+  assert.throws(() => bank.readPdf(cardStatement(CARD_PDF, ['200,00', '2.067,85']).filter((item) => item.str !== '-8,69')), /broken/);
+
+  const data = bank.emptyBank();
+  bank.addFile(data, bank.readCsv(CARD), NOW);
+  assert.equal(bank.addFile(data, file, NOW), 2); // only the two lines the CSV did not have
+  assert.equal(bank.addFile(data, bank.readPdf(cardStatement(CARD_PDF, ['200,00', '2.067,85'])), NOW), 0);
+  const other = bank.emptyBank();
+  bank.addFile(other, file, NOW);
+  assert.equal(bank.addFile(other, bank.readCsv(CARD), NOW), 0); // and the CSV after the PDF adds nothing either
+  assert.equal(other.txs.length, 5);
+});
+
 test('an Openbank statement is read as a table, descriptions over several lines included', () => {
   const file = bank.readOpenbank(statement(OPENBANK, { closing: '14.88' }));
   assert.deepEqual(file.accounts, [{ id: 'ES0000730100550000000001', name: 'Openbank 0001', bank: 'Openbank', balance: 1488, holder: 'ANNA TEST' }]);
@@ -130,6 +179,8 @@ test('an Openbank statement that does not add up is refused', () => {
   const gone = statement(OPENBANK, { closing: '14.88' }).filter((item) => item.str !== '-38.7' || item.y < 100);
   assert.throws(() => bank.readOpenbank(gone), /broken/);
   assert.throws(() => bank.readOpenbank([{ page: 1, x: 0, y: 0, str: 'Een andere pdf' }]), /unknown/);
+  assert.throws(() => bank.readPdf([{ page: 1, x: 0, y: 0, str: 'Een andere pdf' }]), /unknown/);
+  assert.deepEqual(bank.readPdf(statement(OPENBANK, { closing: '14.88' })), bank.readOpenbank(statement(OPENBANK, { closing: '14.88' })));
 });
 
 test('reading a file again, or one that overlaps, adds nothing twice', () => {

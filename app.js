@@ -6,7 +6,7 @@ import {
 import {
   AH, LARGE, START_CATS, US, addBalance, addFile, addStarter, balanceOn, byParty, cardsOn, cardsToAdd, catchUp, decodeText, dayRate, dueOn, emptyBank, ended, figures, fixedCosts,
   fixedSuggestions, forWhom, giftGuesses, giftsBought, giftsToFill, hasGap, heldShops, inCategory, monthOf, onBalance, parseBank, payFrom, plannedOpen, potsLeft, readCsv, salaryBase,
-  addLinked, bought, deposits, goalMonths, salaryToCome, holdings, invested, isGoal, isTrade, monthsFrom, readLinked, readOpenbank, ruleKey, sellsCards, shiftMonth, sortAll, sorter, strayDeposits, tie,
+  addLinked, bought, deposits, goalMonths, salaryToCome, holdings, invested, isGoal, isTrade, monthsFrom, readLinked, readPdf, ruleKey, sellsCards, shiftMonth, sortAll, sorter, strayDeposits, tie,
 } from './bank.js';
 import {
   api, b64u, fromB64u, inviteId, isCode, makePasskey, merge, openData, rand, sealData, tokenOf, unwrap, usePasskey, wrap,
@@ -1285,8 +1285,8 @@ function overviewScreen() {
     return {
       html: `${title}
         ${backupNotice()}
-        ${blank(L('Nog geen bankgegevens', 'No bank data yet'), L('Upload het CSV-bestand van je Rabo-rekening of creditcard, of het PDF-afschrift van Openbank.',
-          'Upload the CSV file of your Rabo account or credit card, or the PDF statement from Openbank.'))}
+        ${blank(L('Nog geen bankgegevens', 'No bank data yet'), L('Upload het CSV-bestand van je Rabo-rekening, het CSV- of PDF-bestand van je Rabo-creditcard, of het PDF-afschrift van Openbank.',
+          'Upload the CSV file of your Rabo account, the CSV or PDF file of your Rabo credit card, or the PDF statement from Openbank.'))}
         <div class="group">${uploadRow()}</div>
         <div class="group">${cards}</div>`,
     };
@@ -2107,9 +2107,9 @@ function settingsScreen() {
       </header>
       <h2 class="section">${L('Bankbestanden', 'Bank files')}</h2>
       <div class="group">${uploadRow()}</div>
-      <p class="group-note">${L(`Kies één of meer bestanden: het CSV-bestand van een Rabo-rekening of creditcard, of het PDF-afschrift van Openbank.
-        Bestanden mogen elkaar overlappen: wat er al staat, komt er niet nog eens bij.`, `Choose one or more files: the CSV file of a Rabo account or
-        credit card, or the PDF statement from Openbank. Files may overlap: what is already there is not added again.`)}</p>
+      <p class="group-note">${L(`Kies één of meer bestanden: het CSV-bestand van een Rabo-rekening, het CSV- of PDF-bestand van een Rabo-creditcard, of het PDF-afschrift van Openbank.
+        Bestanden mogen elkaar overlappen: wat er al staat, komt er niet nog eens bij.`, `Choose one or more files: the CSV file of a Rabo account, the CSV or
+        PDF file of a Rabo credit card, or the PDF statement from Openbank. Files may overlap: what is already there is not added again.`)}</p>
       ${bankSection()}
       ${bank.accounts.length ? `
         <h2 class="section">${L('Rekeningen', 'Accounts')}</h2>
@@ -3072,7 +3072,7 @@ async function importBankFiles() {
       const bytes = new Uint8Array(await file.arrayBuffer());
       const isPdf = String.fromCharCode(...bytes.subarray(0, 4)) === '%PDF';
       const text = isPdf ? '' : decodeText(bytes);
-      if (isPdf) added += addFile(bank, readOpenbank(await pdfItems(bytes)), now);
+      if (isPdf) added += addFile(bank, readPdf(await pdfItems(bytes)), now);
       else if (text.trimStart().startsWith('{')) {
         const data = JSON.parse(text);
         const cards = data.cards ? parseState(JSON.stringify({ cards: data.cards })).cards : []; // throws on a card that is not one
