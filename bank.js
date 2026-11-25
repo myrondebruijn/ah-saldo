@@ -257,11 +257,11 @@ function openbankTxs(iban, holder, lines) {
 }
 
 // What the Kassa server fetched through the bank links (Enable Banking): [{ iban, bank, holder, txs, balances }],
-// the lines and balances as the bank sends them; `bank` is 'Rabo' (also when missing) or 'Openbank'. Each line gets
-// the id, date and words it has when read from the bank's own file, so nothing is added twice. May hold no new lines
-// at all; is otherwise read whole or not at all.
+// the lines and balances as the bank sends them; `bank` is 'Rabo' (also when missing), 'Openbank' or 'Trade Republic'.
+// Each line gets the id, date and words it has when read from the bank's own file, so nothing is added twice. May
+// hold no new lines at all; is otherwise read whole or not at all.
 export function readLinked(list) {
-  const toCents = (amount) => (/^-?\d+(\.\d{1,2})?$/.test(amount) ? Math.round(Number(amount) * 100) : null);
+  const toCents = (amount) => (/^-?\d+(\.\d{1,2}0*)?$/.test(amount) ? Math.round(Number(amount) * 100) : null); // Trade Republic: '10.000000'
   const signed = (line) => {
     const cents = toCents(line.transaction_amount?.amount);
     if (cents === null || !['DBIT', 'CRDT'].includes(line.credit_debit_indicator)) throw broken();
@@ -270,7 +270,9 @@ export function readLinked(list) {
   const accounts = [];
   const txs = [];
   for (const { iban, bank = 'Rabo', holder, txs: lines, balances } of list) {
-    const booked = balances.find((each) => each.balance_type === 'ITBD') ?? balances.find((each) => each.balance_type === 'CLBD');
+    // Trade Republic gives only the balance its app shows as available (OTHR), which may count a card payment not booked yet
+    const booked = balances.find((each) => each.balance_type === 'ITBD') ?? balances.find((each) => each.balance_type === 'CLBD')
+      ?? (bank === 'Trade Republic' ? balances.find((each) => each.balance_type === 'OTHR') : undefined);
     const balance = booked && toCents(booked.balance_amount.amount);
     const owner = tidy(holder).slice(0, 30);
     accounts.push({ id: iban, name: `${bank} ${iban.slice(-4)}`, bank, ...(Number.isInteger(balance) && { balance }), ...(bank === 'Openbank' && owner && { holder: owner }) });
@@ -295,6 +297,18 @@ export function readLinked(list) {
       }))).map((tx, index) => (sorted[index].line.entry_reference ? tx : { ...tx, early: true })));
       continue;
     }
+    if (bank === 'Trade Republic') {
+      // A line says only its day, amount and direction: no number, party or words. It is known by its day and amount
+      // and how many alike came before it that day, which holds as a fetch always has whole days (date_from).
+      const alike = new Map();
+      for (const line of done) {
+        const cents = signed(line);
+        const key = `${line.booking_date}.${cents}`;
+        alike.set(key, (alike.get(key) ?? 0) + 1);
+        txs.push({ id: `${iban}.${key}.${alike.get(key)}`, acc: iban, date: line.booking_date, cents, name: 'Trade Republic', text: '' });
+      }
+      continue;
+    }
     // Rabo: entry_reference is the Volgnr of the CSV export and the other fields hold what its columns hold. The date
     // is the booking date, which the CSV shows one day later for a few lines. Oldest first, as in the CSV.
     for (const line of done.sort((a, b) => a.entry_reference - b.entry_reference)) {
@@ -310,6 +324,17 @@ export function readLinked(list) {
         ...(line.bank_transaction_code?.sub_code === 'cc' && { own: true }), // as the CSV's Code 'cc': paying off the credit card
       });
     }
+  }
+  // A Trade Republic line names no other account. When this fetch holds a line of another account that went to or
+  // came from it, the same amount the other way within three days, it is that transfer between own accounts.
+  // shortcut: pairs only within one fetch; a line whose other side came in another fetch is sorted by hand.
+  const paired = new Set();
+  for (const tx of txs.filter((each) => accounts.some((account) => account.id === each.acc && account.bank === 'Trade Republic'))) {
+    const other = txs.find((each) => each.iban === tx.acc && each.cents === -tx.cents && !paired.has(each)
+      && Math.abs(Date.parse(each.date) - Date.parse(tx.date)) <= 3 * 864e5);
+    if (!other) continue;
+    paired.add(other);
+    Object.assign(tx, { name: accounts.find((account) => account.id === other.acc).name, iban: other.acc });
   }
   if (!txs.every(isTx) || !accounts.every(isAccount)) throw broken();
   return { accounts, txs };

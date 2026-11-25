@@ -230,6 +230,28 @@ test('the Rabo link gives the lines of the CSV the same ids and texts, so only n
   assert.throws(() => bank.readLinked([{ ...LINKED[0], txs: [{ ...LINKED[0].txs[0], transaction_amount: { amount: '4,00' } }] }]), /broken/);
 });
 
+test('a Trade Republic line, which says only its day and amount, is known by them and paired with the other side of a transfer', () => {
+  const TR = 'NL00TRBK0000000001';
+  const line = (date, amount, indicator, status = 'BOOK') => ({ entry_reference: null, status, booking_date: date, credit_debit_indicator: indicator,
+    transaction_amount: { currency: 'EUR', amount }, remittance_information: null }); // as the real link sends it, 2026-11-25
+  const list = [{ ...LINKED[0], txs: [linked(21, '2026-07-02', '500.00', 'DBIT', 'A Test', { iban: TR, code: 'tb' })] },
+    { iban: TR, bank: 'Trade Republic', holder: 'A Test', balances: [{ balance_type: 'OTHR', balance_amount: { amount: '520' } }],
+      txs: [line('2026-07-03', '500.000000', 'CRDT'), line('2026-07-01', '10.000000', 'CRDT'), line('2026-07-01', '10.000000', 'CRDT'), line('2026-07-03', '5.00', 'DBIT', 'PDNG')] }];
+  const file = bank.readLinked(list);
+  assert.deepEqual(file.accounts[1], { id: TR, name: 'Trade Republic 0001', bank: 'Trade Republic', balance: 52000 });
+  assert.deepEqual(file.txs.filter((tx) => tx.acc === TR), [
+    { id: `${TR}.2026-07-03.50000.1`, acc: TR, date: '2026-07-03', cents: 50000, name: 'Rabo 6789', text: '', iban: 'NL00TEST0123456789' },
+    { id: `${TR}.2026-07-01.1000.1`, acc: TR, date: '2026-07-01', cents: 1000, name: 'Trade Republic', text: '' },
+    { id: `${TR}.2026-07-01.1000.2`, acc: TR, date: '2026-07-01', cents: 1000, name: 'Trade Republic', text: '' },
+  ]);
+  const data = loaded();
+  assert.equal(bank.addLinked(data, file, NOW).added, 4);
+  assert.equal(bank.addLinked(data, bank.readLinked(list), NOW).added, 0); // the same days again add nothing
+  const catOf = bank.sorter(data);
+  assert.deepEqual(data.txs.filter((tx) => tx.cents === 50000 || tx.cents === -50000).map(catOf), ['overboeking', 'overboeking']);
+  assert.throws(() => bank.readLinked([{ ...list[1], txs: [line('2026-07-03', '5.005', 'DBIT')] }]), /broken/);
+});
+
 // The made-up Openbank statement above as its bank link sends it: a day's lines numbered from the newest (1) back,
 // no balance per line, only the balance now.
 function openbankLink(rows, balance) {

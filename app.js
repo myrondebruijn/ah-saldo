@@ -327,12 +327,12 @@ async function invite() {
 }
 
 // ---------- bank links ----------
-// With sharing on, the Kassa server can fetch the new lines of the linked Rabo and Openbank accounts itself (see
+// With sharing on, the Kassa server can fetch the new lines of the linked Rabo, Openbank and Trade Republic accounts itself (see
 // worker/index.js). Kassa asks for them when it opens and while it is on screen, at most once an hour per phone. Linking
 // goes through the bank's own consent page, which sends the person back to Kassa's address with a one-time code.
 
 const LINKS_KEY = `${KEY}-links`; // on this phone: { banks: { Rabo: until, ... }, at: the last try, ok: the last fetch, failed: banks }
-const LINKABLE = { Rabo: 'Rabobank', Openbank: 'Openbank' }; // Kassa's name of a bank -> Enable Banking's
+const LINKABLE = { Rabo: 'Rabobank', Openbank: 'Openbank', 'Trade Republic': 'Trade Republic' }; // Kassa's name of a bank -> Enable Banking's
 const HOUR = 60 * 60 * 1000;
 let links = readLinks();
 localStorage.removeItem(`${KEY}-rabo`); // what the first version, for Rabo alone, kept; the next fetch fills the new one
@@ -2076,8 +2076,8 @@ function bankSection() {
     </div>
     <p class="group-note">${linked || L('Koppel je rekeningen: dan haalt Kassa nieuwe transacties zelf op als je de app opent.',
       'Link your accounts: Kassa then fetches new transactions itself when you open the app.')} ${time ? L(`Laatst opgehaald ${time}.`, `Last fetched ${time}.`) : ''}
-      ${L('Elke 180 dagen keur je een koppeling opnieuw goed in de app van de bank. De transacties gaan via de Kassa-server en Enable Banking, die ze kunnen lezen.',
-        'Every 180 days you approve a link again in the bank\'s app. The transactions pass through the Kassa server and Enable Banking, which can read them.')}</p>`;
+      ${L('Elke 180 dagen (Trade Republic: 90) keur je een koppeling opnieuw goed in de app van de bank. De transacties gaan via de Kassa-server en Enable Banking, die ze kunnen lezen.',
+        'Every 180 days (Trade Republic: 90) you approve a link again in the bank\'s app. The transactions pass through the Kassa server and Enable Banking, which can read them.')}</p>`;
 }
 
 function pushSection() {

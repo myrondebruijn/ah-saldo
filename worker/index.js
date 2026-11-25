@@ -86,7 +86,7 @@ async function booked(env, uid, from, ip) {
 }
 
 // Enable Banking's name of a bank -> the name Kassa gives its accounts (bank.js, readLinked)
-const BANKS = { Rabobank: 'Rabo', Openbank: 'Openbank' };
+const BANKS = { Rabobank: 'Rabo', Openbank: 'Openbank', 'Trade Republic': 'Trade Republic' };
 
 // The links that have a session: [{ bank, accounts: [{ uid, iban, holder }], until }]
 const links = async (db) => (await db.prepare('SELECT bank, accounts, until FROM links WHERE session IS NOT NULL').all()).results
@@ -99,7 +99,7 @@ async function newLines(db, found) {
   const seen = row ? JSON.parse(row.value) : {};
   const fresh = [];
   for (const { iban, bank: name, txs } of found) {
-    const lines = txs.filter((line) => line.status === 'BOOK' && line.entry_reference);
+    const lines = txs.filter((line) => line.status === 'BOOK' && line.entry_reference); // Trade Republic numbers none: not announced
     const known = Array.isArray(seen[iban]) ? new Set(seen[iban]) : null; // null: first sight (or the old form, a number)
     if (known) fresh.push(...lines.filter((line) => !known.has(line.entry_reference)).map((line) => ({ ...line, bank: name })));
     seen[iban] = [...new Set([...(known ?? []), ...lines.map((line) => line.entry_reference)])].slice(-400);
@@ -306,7 +306,7 @@ async function handle(request, env, ctx) {
     if (!Object.hasOwn(BANKS, body.bank)) return fail(400);
     const state = crypto.randomUUID();
     const { url: consent } = await bank(env, 'POST', '/auth', { body: {
-      access: { valid_until: new Date(now + 179 * DAY).toISOString() }, // both banks allow 180 days
+      access: { valid_until: new Date(now + (body.bank === 'Trade Republic' ? 89 : 179) * DAY).toISOString() }, // what each bank allows: 90 or 180 days
       aspsp: { name: body.bank, country: 'NL' }, state, redirect_url: `${env.ORIGIN}/ah-saldo/`, psu_type: 'personal',
     } });
     await db.prepare('INSERT INTO links (bank, state, asked) VALUES (?, ?, ?) ON CONFLICT (bank) DO UPDATE SET state = excluded.state, asked = excluded.asked')
